@@ -26,10 +26,10 @@ Then build the installer:
 npm run package:win
 ```
 
-For 1.0.1 the installer is:
+For 1.0.2 the installer is:
 
 ```text
-release\NetWatch-Setup-1.0.1.exe
+release\NetWatch-Setup-1.0.2.exe
 ```
 
 ## Installer behavior
@@ -87,7 +87,7 @@ Before publishing an installer:
 
 1. Build from a clean NTFS checkout with `npm ci`.
 2. Test the unpacked application.
-3. Build and test `NetWatch-Setup-1.0.1.exe` through install/reinstall/uninstall/reinstall.
+3. Build and test `NetWatch-Setup-1.0.2.exe` through install/reinstall/uninstall/reinstall.
 4. Confirm expected WSL private state survives normal uninstall/reinstall.
 5. Confirm installed resources contain the license/notices and mpv provenance files.
 6. Hash the source ZIP and installer.

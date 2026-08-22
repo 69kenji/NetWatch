@@ -191,7 +191,6 @@ async def _movie_payload(tmdb_id: int, min_seeders: int) -> dict:
                 query=title,
                 imdb_id=movie.get("imdb_id"),
                 min_seeders=min_seeders,
-                include_1337x=not bool(movie.get("is_anime")),
             )
             if not movie.get("is_anime"):
                 aliases = _media_aliases(movie)
@@ -399,7 +398,6 @@ async def episode_stream_options(
             imdb_id=series.get("imdb_id"),
             min_seeders=min_seeders,
             max_results=80,
-            include_1337x=not bool(anime or series.get("is_anime")),
         )
         if anime or series.get("is_anime"):
             results = [
@@ -431,7 +429,6 @@ async def episode_stream_options(
                 imdb_id=series.get("imdb_id"),
                 min_seeders=min_seeders,
                 max_results=80,
-                include_1337x=False,
             )
             results = [item for item in raw if _anime_episode_title_matches(
                 item.get("title") or "", season_number, episode_number

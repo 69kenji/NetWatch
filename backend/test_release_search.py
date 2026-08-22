@@ -1,4 +1,3 @@
-import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -7,108 +6,15 @@ from services.release_search import ReleaseSearchService
 
 
 class ReleaseSearchTests(unittest.IsolatedAsyncioTestCase):
-    async def test_direct_1337x_survives_prowlarr_failure(self):
-        direct = [{
-            "title": "Interstellar 2014 1080p",
-            "size": 10,
-            "seeders": 20,
-            "resolution": "1080p",
-            "source_type": "1337x_detail",
-        }]
+    async def test_prowlarr_failure_propagates(self):
+        failure = DependencyUnavailableError("prowlarr", "down")
         with patch(
             "services.release_search.ProwlarrService.search",
-            new=AsyncMock(side_effect=DependencyUnavailableError("prowlarr", "timeout")),
-        ), patch(
-            "services.release_search.X1337Service.enabled",
-            return_value=True,
-        ), patch(
-            "services.release_search.X1337Service.search",
-            new=AsyncMock(return_value=direct),
+            new=AsyncMock(side_effect=failure),
         ):
-            results = await ReleaseSearchService.search("Interstellar")
-        self.assertEqual(results, direct)
-
-    async def test_slow_direct_1337x_does_not_hold_prowlarr_results_indefinitely(self):
-        prowlarr = [{
-            "title": "Interstellar 2014 1080p",
-            "size": 10,
-            "seeders": 4,
-            "resolution": "1080p",
-            "source_type": "torrent_url",
-        }]
-
-        async def slow_direct(**_kwargs):
-            await asyncio.sleep(10)
-            return []
-
-        with patch(
-            "services.release_search.ProwlarrService.search",
-            new=AsyncMock(return_value=prowlarr),
-        ), patch(
-            "services.release_search.X1337Service.enabled",
-            return_value=True,
-        ), patch(
-            "services.release_search.X1337Service.search",
-            new=AsyncMock(side_effect=slow_direct),
-        ), patch(
-            "services.release_search.DIRECT_1337X_SEARCH_BUDGET_SECS",
-            0.01,
-        ):
-            results = await ReleaseSearchService.search("Interstellar")
-        self.assertEqual(results, prowlarr)
-
-    async def test_direct_1337x_failure_is_nonfatal_when_prowlarr_succeeds(self):
-        prowlarr = [{
-            "title": "Interstellar 2014 1080p",
-            "size": 10,
-            "seeders": 4,
-            "resolution": "1080p",
-            "source_type": "torrent_url",
-        }]
-        with patch(
-            "services.release_search.ProwlarrService.search",
-            new=AsyncMock(return_value=prowlarr),
-        ), patch(
-            "services.release_search.X1337Service.enabled",
-            return_value=True,
-        ), patch(
-            "services.release_search.X1337Service.search",
-            new=AsyncMock(side_effect=DependencyUnavailableError("1337x", "down")),
-        ):
-            results = await ReleaseSearchService.search("Interstellar")
-        self.assertEqual(results, prowlarr)
-
-    async def test_duplicate_prefers_torrent_url_over_direct_1337x_detail(self):
-        prowlarr = [{
-            "title": "Interstellar 2014 1080p",
-            "size": 10,
-            "seeders": 4,
-            "resolution": "1080p",
-            "source_type": "torrent_url",
-            "source_url": "http://prowlarr/download/1",
-        }]
-        direct = [{
-            "title": "Interstellar 2014 1080p",
-            "size": 10,
-            "seeders": 400,
-            "resolution": "1080p",
-            "source_type": "1337x_detail",
-            "source_url": "nw1337x:0:/torrent/1/interstellar/",
-        }]
-        with patch(
-            "services.release_search.ProwlarrService.search",
-            new=AsyncMock(return_value=prowlarr),
-        ), patch(
-            "services.release_search.X1337Service.enabled",
-            return_value=True,
-        ), patch(
-            "services.release_search.X1337Service.search",
-            new=AsyncMock(return_value=direct),
-        ):
-            results = await ReleaseSearchService.search("Interstellar")
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["source_type"], "torrent_url")
-        self.assertEqual(results[0]["source_url"], "http://prowlarr/download/1")
+            with self.assertRaises(DependencyUnavailableError) as ctx:
+                await ReleaseSearchService.search("Interstellar")
+        self.assertEqual(ctx.exception.service, "prowlarr")
 
     async def test_same_title_size_different_known_hashes_are_preserved(self):
         prowlarr = [
@@ -134,16 +40,13 @@ class ReleaseSearchTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "services.release_search.ProwlarrService.search",
             new=AsyncMock(return_value=prowlarr),
-        ), patch(
-            "services.release_search.X1337Service.enabled",
-            return_value=False,
         ):
             results = await ReleaseSearchService.search("Breaking Bad S05E16")
 
         self.assertEqual(len(results), 2)
         self.assertEqual({item["info_hash"] for item in results}, {"1" * 40, "2" * 40})
 
-    async def test_same_hash_duplicate_still_uses_source_preference(self):
+    async def test_same_hash_duplicate_prefers_torrent_url(self):
         shared_hash = "a" * 40
         prowlarr = [
             {
@@ -168,29 +71,58 @@ class ReleaseSearchTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "services.release_search.ProwlarrService.search",
             new=AsyncMock(return_value=prowlarr),
-        ), patch(
-            "services.release_search.X1337Service.enabled",
-            return_value=False,
         ):
             results = await ReleaseSearchService.search("Interstellar")
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["source_type"], "torrent_url")
 
-    async def test_both_sources_failure_raises(self):
-        failure = DependencyUnavailableError("source", "down")
+    async def test_same_source_rank_prefers_higher_seeder_count(self):
+        shared_hash = "b" * 40
+        prowlarr = [
+            {
+                "title": "Example Movie 2026 1080p",
+                "size": 20,
+                "seeders": 3,
+                "resolution": "1080p",
+                "source_type": "magnet",
+                "source_url": "magnet:?xt=urn:btih:" + shared_hash,
+                "info_hash": shared_hash,
+                "indexer": "Indexer A",
+            },
+            {
+                "title": "Example Movie 2026 1080p",
+                "size": 20,
+                "seeders": 9,
+                "resolution": "1080p",
+                "source_type": "magnet",
+                "source_url": "magnet:?xt=urn:btih:" + shared_hash,
+                "info_hash": shared_hash,
+                "indexer": "Indexer B",
+            },
+        ]
         with patch(
             "services.release_search.ProwlarrService.search",
-            new=AsyncMock(side_effect=failure),
-        ), patch(
-            "services.release_search.X1337Service.enabled",
-            return_value=True,
-        ), patch(
-            "services.release_search.X1337Service.search",
-            new=AsyncMock(side_effect=failure),
+            new=AsyncMock(return_value=prowlarr),
         ):
-            with self.assertRaises(DependencyUnavailableError):
-                await ReleaseSearchService.search("Interstellar")
+            results = await ReleaseSearchService.search("Example Movie")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["indexer"], "Indexer B")
+
+    async def test_results_are_sorted_by_resolution_then_seeders(self):
+        prowlarr = [
+            {"title": "A 720p", "size": 1, "seeders": 100, "resolution": "720p", "source_type": "magnet"},
+            {"title": "B 1080p", "size": 2, "seeders": 2, "resolution": "1080p", "source_type": "magnet"},
+            {"title": "C 1080p", "size": 3, "seeders": 8, "resolution": "1080p", "source_type": "magnet"},
+        ]
+        with patch(
+            "services.release_search.ProwlarrService.search",
+            new=AsyncMock(return_value=prowlarr),
+        ):
+            results = await ReleaseSearchService.search("Example")
+
+        self.assertEqual([item["title"] for item in results], ["C 1080p", "B 1080p", "A 720p"])
 
 
 if __name__ == "__main__":

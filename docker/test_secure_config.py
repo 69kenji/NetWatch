@@ -112,10 +112,10 @@ class SecureConfigTests(unittest.TestCase):
     def test_env_update_preserves_unmanaged_settings(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "backend.env"
-            path.write_text("X1337_ENABLED=false\nTMDB_API_KEY=\n", encoding="utf-8")
+            path.write_text("CUSTOM_SETTING=false\nTMDB_API_KEY=\n", encoding="utf-8")
             secure_config.update_env_keys(path, {"TMDB_API_KEY": "abcdefgh12345678"})
             text = path.read_text("utf-8")
-            self.assertIn("X1337_ENABLED=false", text)
+            self.assertIn("CUSTOM_SETTING=false", text)
             self.assertIn("TMDB_API_KEY=abcdefgh12345678", text)
             self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
 

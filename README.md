@@ -65,7 +65,7 @@ For the full network/privacy model, see [`docs/network-threat-model.md`](docs/ne
 ## Features
 
 - Home, Discover, and unified TMDB search for movies, TV, and anime.
-- Torrent discovery through Prowlarr plus a dedicated 1337x/FlareSolverr path.
+- Torrent discovery through user-configured Prowlarr indexers, with bundled FlareSolverr available as an indexer proxy.
 - Direct libtorrent streaming with seek-aware HTTP Range scheduling.
 - Native Windows mpv playback with fullscreen, seeking, audio tracks, subtitles, buffering/recovery, and live network telemetry.
 - OpenSubtitles and SubDL subtitle integration.
@@ -87,6 +87,8 @@ The Windows installer can guide you through installing or enabling WSL, Ubuntu, 
 
 > **TorrentDownload:** this indexer proved unreliable during 1.0 testing. Prowlarr grabs can resolve to magnets whose reported swarm counts do not reflect usable peers. Prefer another general-purpose indexer.
 
+Cloudflare-protected indexers should be configured in Prowlarr rather than in NetWatch itself. The bundled FlareSolverr service is reachable from Prowlarr at `http://127.0.0.1:8191`; assign a matching Prowlarr indexer-proxy tag to the indexers that need it.
+
 ## First run
 
 The packaged setup flow is:
@@ -96,8 +98,6 @@ The packaged setup flow is:
 3. Enter and validate TMDB, OpenSubtitles, and SubDL API keys.
 4. Configure Prowlarr and enter its API key.
 5. Start NetWatch normally.
-
-VPNBook: Use UDP port 443 by default. If performance is poor, try 25018 instead.
 
 NetWatch rewrites the imported WireGuard configuration into its own canonical form. Provider command hooks are rejected, a full IPv4 tunnel (`0.0.0.0/0`) is required, and the VPN configuration must provide a usable IPv4 DNS resolver.
 
@@ -164,7 +164,7 @@ npm run package:win
 The release artifact is written as:
 
 ```text
-release\NetWatch-Setup-1.0.1.exe
+release\NetWatch-Setup-1.0.2.exe
 ```
 
 Use `npm ci` for reproducible builds. Do not replace it with `npm install` and do not use `npm audit fix --force`.

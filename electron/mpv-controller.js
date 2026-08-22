@@ -38,6 +38,20 @@ function is2xx(value) {
   return Number.isFinite(value) && value >= 200 && value < 300
 }
 
+function startupPlaybackReady(state) {
+  return Boolean(
+    state
+      && !state.idle
+      && Number.isFinite(state.duration)
+      && state.duration > 0
+      // `vo-configured` is not a sufficient startup signal because NetWatch
+      // deliberately uses --force-window=immediate. Wait until mpv has loaded
+      // an actual video decoder instead; hwdec-current is unavailable before
+      // that point and is the string `no` when software decoding is active.
+      && typeof state.hwdecCurrent === 'string'
+  )
+}
+
 function nativeWindowHandleToDecimal(win) {
   const buffer = win.getNativeWindowHandle()
 
@@ -451,6 +465,8 @@ class MpvController extends EventEmitter {
     this.pending = new Map()
     this.ready = false
     this.stopping = false
+    this.startupHoldActive = false
+    this.startupReadyWaiter = null
     this.state = this._defaultState()
   }
 
@@ -492,6 +508,35 @@ class MpvController extends EventEmitter {
   _setState(patch) {
     this.state = { ...this.state, ...patch }
     this.emit('state', this.getState())
+    this._resolveStartupReadyWaiterIfReady()
+  }
+
+  _resolveStartupReadyWaiterIfReady() {
+    if (!this.startupReadyWaiter || !startupPlaybackReady(this.state)) return
+    const waiter = this.startupReadyWaiter
+    this.startupReadyWaiter = null
+    waiter.resolve()
+  }
+
+  _waitForStartupVideoReady() {
+    if (!this.startupHoldActive || startupPlaybackReady(this.state)) return Promise.resolve()
+    if (this.startupReadyWaiter) return this.startupReadyWaiter.promise
+
+    let resolve
+    let reject
+    const promise = new Promise((onResolve, onReject) => {
+      resolve = onResolve
+      reject = onReject
+    })
+    this.startupReadyWaiter = { promise, resolve, reject }
+    return promise
+  }
+
+  _cancelStartupReadyWaiter(error = new Error('mpv startup stopped')) {
+    if (!this.startupReadyWaiter) return
+    const waiter = this.startupReadyWaiter
+    this.startupReadyWaiter = null
+    waiter.reject(error)
   }
 
   _log(level, message) {
@@ -509,6 +554,8 @@ class MpvController extends EventEmitter {
 
     await this.stop({ graceful: false })
     this.stopping = false
+    this.startupHoldActive = Boolean(initialSource)
+    this._cancelStartupReadyWaiter()
     this.state = this._defaultState()
     this._setState({ status: 'starting' })
 
@@ -546,6 +593,11 @@ class MpvController extends EventEmitter {
 ]
 
     if (initialSource) {
+      // Hold the initial playback clock until mpv has configured a real video
+      // output and learned the file duration. Without this, audio can begin
+      // while NetWatch is still correctly covering the not-yet-ready video
+      // surface with the Starting video/buffering overlay.
+      args.push('--pause')
       args.push(initialSource)
 }
     this._log('info', `Starting mpv (${executable}) attached to HWND ${hwnd}`)
@@ -578,6 +630,19 @@ class MpvController extends EventEmitter {
 
     this.ready = true
     this._setState({ status: 'ready', ready: true, error: null })
+
+    if (this.startupHoldActive) {
+      await this._waitForStartupVideoReady()
+      if (this.stopping || !this.mpvPid) throw new Error('mpv stopped before initial video became ready')
+
+      this._log('info', 'Initial video is ready; releasing startup playback hold')
+      await this.request(['set_property', 'pause', false], 5000)
+      this.startupHoldActive = false
+      // The command succeeded, so make the state transition deterministic even
+      // if mpv's corresponding property-change notification arrives one tick later.
+      this._setState({ paused: false, status: 'playing' })
+    }
+
     return this.getState()
   }
 
@@ -954,6 +1019,8 @@ class MpvController extends EventEmitter {
   async stop({ graceful = true } = {}) {
     this.stopping = true
     this.ready = false
+    this.startupHoldActive = false
+    this._cancelStartupReadyWaiter(new Error('mpv stopped during startup'))
 
     const mpvPid = this.mpvPid
     let gracefulQuitSent = false
@@ -1014,4 +1081,5 @@ module.exports = {
   resolveMpvExecutable,
   spawnMpvOnWindows,
   is2xx,
+  startupPlaybackReady,
 }

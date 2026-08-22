@@ -183,7 +183,7 @@ export function MovieDetailsView({
                   <span className="nw-stream-row__main">
                     <strong>{result.title}</strong>
                     <span>
-                      {[result.resolution, result.source, result.codec, result.audio]
+                      {[result.resolution, result.source, result.codec, result.audio, result.indexer]
                         .filter(value => value && value !== 'Unknown')
                         .join(' · ') || 'Torrent release'}
                     </span>

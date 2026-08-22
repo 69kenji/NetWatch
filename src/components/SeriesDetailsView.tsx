@@ -471,7 +471,7 @@ export function SeriesDetailsView({
                     </span>
                     <span className="nw-stream-row__main">
                       <strong>{result.title}</strong>
-                      <span>{[result.resolution, result.source, result.codec, result.audio].filter(value => value && value !== 'Unknown').join(' · ') || 'Torrent release'}</span>
+                      <span>{[result.resolution, result.source, result.codec, result.audio, result.indexer].filter(value => value && value !== 'Unknown').join(' · ') || 'Torrent release'}</span>
                     </span>
                     <span className="nw-stream-row__stats">
                       <span><Group width={16} height={16} /> {result.seeders ?? 0}</span>

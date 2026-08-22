@@ -14,7 +14,6 @@ from pydantic import BaseModel
 from services.exceptions import DependencyUnavailableError
 from services.prowlarr import ProwlarrService
 from services.release_search import ReleaseSearchService
-from services.x1337 import SOURCE_PREFIX as X1337_SOURCE_PREFIX, X1337Service
 from services.torrent_engine import (
     RangeRequestCancelledError,
     RangeRequestSupersededError,
@@ -139,11 +138,7 @@ async def add_torrent(req: AddTorrentRequest):
                 req.magnet, req.media_name, expected_hash=req.expected_hash
             )
         else:
-            is_1337x = req.magnet.startswith(X1337_SOURCE_PREFIX)
-            if is_1337x:
-                resolved = await X1337Service.resolve_torrent_source(req.magnet)
-            else:
-                resolved = await ProwlarrService.resolve_torrent_source(req.magnet)
+            resolved = await ProwlarrService.resolve_torrent_source(req.magnet)
 
             if resolved["source_type"] == "magnet":
                 added = await TorrentEngineService.add_torrent(
@@ -151,9 +146,7 @@ async def add_torrent(req: AddTorrentRequest):
                     req.media_name,
                     expected_hash=req.expected_hash,
                 )
-                added["source_resolution"] = (
-                    "1337x_detail_to_magnet" if is_1337x else "prowlarr_redirect_to_magnet"
-                )
+                added["source_resolution"] = "prowlarr_redirect_to_magnet"
             else:
                 added = await TorrentEngineService.add_torrent_file(
                     resolved["torrent_bytes"],
