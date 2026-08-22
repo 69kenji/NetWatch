@@ -1,4 +1,5 @@
-# NetWatch
+# <img width="128" height="128" alt="icon" src="https://github.com/user-attachments/assets/25b082e7-53be-4ce0-8ae4-61bcdada226a" />
+NetWatch
 
 NetWatch is a Windows 11 desktop media client built with Electron/React, FastAPI, direct `python-libtorrent`, Prowlarr, WireGuard, FlareSolverr, and native Windows mpv.
 
