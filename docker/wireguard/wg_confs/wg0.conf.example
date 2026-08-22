@@ -1,0 +1,27 @@
+# NetWatch WireGuard reference template.
+#
+# Packaged NetWatch users should import the standard .conf supplied by their VPN
+# provider through the secure first-run wizard. NetWatch validates known data
+# fields, rejects provider command hooks, keeps the IPv4 full-tunnel fields used
+# by the 1.0 runtime, and writes the active private wg0.conf itself.
+#
+# The active file is stored outside the immutable runtime at:
+#   ~/.local/share/netwatch/config/wireguard/wg_confs/wg0.conf
+# and must remain mode 0600. Never commit or share it.
+
+[Interface]
+PrivateKey = <VPN_CLIENT_PRIVATE_KEY>
+Address = <VPN_CLIENT_IPV4_ADDRESS>
+DNS = <VPN_DNS_IPV4_ADDRESS>
+
+# The active packaged configuration receives NetWatch's fixed fail-closed
+# PostUp/PreDown hooks automatically. Provider-supplied command hooks are not
+# accepted by the secure importer.
+
+[Peer]
+PublicKey = <VPN_SERVER_PUBLIC_KEY>
+# PresharedKey = <OPTIONAL_PRESHARED_KEY>
+Endpoint = <VPN_SERVER_HOST_OR_IPV4>:<VPN_SERVER_PORT>
+AllowedIPs = 0.0.0.0/0
+# PersistentKeepalive is optional and is preserved when supplied by the provider.
+PersistentKeepalive = 25

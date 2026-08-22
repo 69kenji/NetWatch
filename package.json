@@ -1,0 +1,141 @@
+{
+  "name": "netwatch",
+  "version": "1.0.0",
+  "description": "Self-hosted Windows media client with a Docker/VPN-isolated runtime",
+  "license": "GPL-3.0-only",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:react\" \"npm run dev:electron\"",
+    "dev:react": "vite",
+    "build:renderer": "vite build",
+    "dev:electron": "wait-on http://localhost:5173 && electron .",
+    "build": "npm run package:win",
+    "backend": "cd backend && uvicorn main:app --reload --port 8000",
+    "docker:up": "docker compose -f docker/docker-compose.yml up -d",
+    "docker:down": "docker compose -f docker/docker-compose.yml down",
+    "package:dir": "npm run build:renderer && electron-builder --win --dir",
+    "package:win": "npm run build:renderer && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "axios": "^1.18.1",
+    "framer-motion": "^11.3.0",
+    "iconoir-react": "^7.12.1",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "zustand": "^4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.4",
+    "concurrently": "^10.0.4",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.7",
+    "vite": "^8.1.5",
+    "wait-on": "^9.1.0"
+  },
+  "build": {
+    "appId": "com.netwatch.desktop",
+    "productName": "NetWatch",
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/mpv",
+        "to": "mpv",
+        "filter": [
+          "mpv.com",
+          "mpv.exe",
+          "*.dll",
+          "portable_config/**/*",
+          "README.md",
+          "Copyright.txt",
+          "LICENSE.GPL-2.0",
+          "BUILD-PROVENANCE.md"
+        ]
+      },
+      {
+        "from": "backend",
+        "to": "runtime-template/backend",
+        "filter": [
+          "**/*",
+          "!.env",
+          "!__pycache__/**",
+          "!*.pyc",
+          "!*.pyo"
+        ]
+      },
+      {
+        "from": "torrent-engine",
+        "to": "runtime-template/torrent-engine",
+        "filter": [
+          "**/*",
+          "!__pycache__/**",
+          "!*.pyc",
+          "!*.pyo"
+        ]
+      },
+      {
+        "from": "docker",
+        "to": "runtime-template/docker",
+        "filter": [
+          "**/*",
+          "!prowlarr/config/**",
+          "!wireguard/wg_confs/wg0.conf",
+          "!**/*.db",
+          "!**/*.log",
+          "!test_secure_config.py"
+        ]
+      },
+      {
+        "from": "packaging/runtime-version.txt",
+        "to": "runtime-template/.netwatch-runtime-version"
+      },
+      {
+        "from": "LICENSE",
+        "to": "LICENSE.txt"
+      },
+      {
+        "from": "THIRD_PARTY_NOTICES.md",
+        "to": "THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "DISCLAIMER.md",
+        "to": "DISCLAIMER.md"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "executableName": "NetWatch",
+      "icon": "build/netwatch.ico",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": false,
+      "artifactName": "NetWatch-Setup-${version}.${ext}",
+      "installerIcon": "build/netwatch.ico",
+      "uninstallerIcon": "build/netwatch.ico",
+      "shortcutName": "NetWatch",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true,
+      "include": "build/installer.nsh",
+      "allowToChangeInstallationDirectory": true
+    },
+    "copyright": "Copyright \u00a9 2026 NetWatch contributors"
+  },
+  "engines": {
+    "node": ">=22.12 <23"
+  },
+  "author": "NetWatch contributors"
+}

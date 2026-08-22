@@ -1,0 +1,173 @@
+services:
+  vpn:
+    image: lscr.io/linuxserver/wireguard:1.0.20260223-r0-ls120@sha256:3abfd4b82212106e357989750b9c0c9859aa511f5305a9a55c18c8de7198b655
+    container_name: nw_vpn
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: 1
+      net.ipv6.conf.all.disable_ipv6: 1
+      net.ipv6.conf.default.disable_ipv6: 1
+    volumes:
+      - ./wireguard:/config
+    # Every NetWatch network client shares this namespace. Host-facing local
+    # APIs are published here and bound to loopback only; no app service gets a
+    # separate Docker egress path.
+    ports:
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:9696:9696"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wg show wg0 >/dev/null 2>&1 && ip route get 1.1.1.1 | grep -q 'dev wg0'"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+
+  torrent-engine:
+    build:
+      context: ../torrent-engine
+      dockerfile: Dockerfile
+    container_name: nw_torrent_engine
+    user: "1000:1000"
+    network_mode: "service:vpn"
+    depends_on:
+      vpn:
+        condition: service_healthy
+    environment:
+      - NETWATCH_DOWNLOAD_DIR=/tmp/netwatch
+      - NETWATCH_VPN_INTERFACE=wg0
+      - NETWATCH_LISTEN_PORT=6881
+      - NETWATCH_UPLOAD_LIMIT=65536
+      - NETWATCH_RANGE_LOOKAHEAD_BYTES=33554432
+      - NETWATCH_DEADLINE_STEP_MS=250
+      - NETWATCH_RANGE_POLL_MS=100
+    volumes:
+      - ./torrent-engine/resolv.conf:/etc/resolv.conf:ro
+      - nw_downloads:/tmp/netwatch
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:2.5.2.5491-ls156@sha256:1295cff29d10b486c0d8324d1559a552140a5932bf8b3d87e398654414f63f92
+    container_name: nw_prowlarr
+    network_mode: "service:vpn"
+    depends_on:
+      vpn:
+        condition: service_healthy
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+    volumes:
+      - ./torrent-engine/resolv.conf:/etc/resolv.conf:ro
+      - ./prowlarr/config:/config
+    restart: unless-stopped
+
+  flaresolverr:
+    # Build the exact FlareSolverr v3.5.0 source revision against current
+    # Debian security packages instead of using the stale prebuilt release image.
+    image: netwatch-flaresolverr:3.5.0-4ca91a2
+    build:
+      context: https://github.com/FlareSolverr/FlareSolverr.git#4ca91a24f87a73f963e1d6610cbf3b9f01c1cc1b
+    container_name: nw_flaresolverr
+    network_mode: "service:vpn"
+    depends_on:
+      vpn:
+        condition: service_healthy
+    environment:
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+      - CAPTCHA_SOLVER=none
+      - TZ=UTC
+    volumes:
+      - ./torrent-engine/resolv.conf:/etc/resolv.conf:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, urllib.request;
+          req=urllib.request.Request('http://127.0.0.1:8191/v1',data=json.dumps({'cmd':'sessions.list'}).encode(),headers={'Content-Type':'application/json'});
+          body=json.loads(urllib.request.urlopen(req,timeout=5).read().decode());
+          assert isinstance(body.get('sessions'), list)
+      interval: 15s
+      timeout: 8s
+      retries: 4
+      start_period: 25s
+    restart: unless-stopped
+
+  backend-cache-init:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    # Migrate cache ownership once before the non-root backend starts. This
+    # service has no network namespace and retains only CAP_CHOWN for the
+    # mounted cache path; it exits immediately after the migration.
+    user: "0:0"
+    network_mode: "none"
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      # secure_config.py keeps the private data tree at 0700. The one-shot
+      # ownership migrator needs directory traversal only for this mounted
+      # cache path; it still has no network namespace and no broad DAC override.
+      - DAC_READ_SEARCH
+    volumes:
+      - nw_backend_cache:/var/lib/netwatch/cache
+    command: ["sh", "-c", "chown -R 1000:1000 /var/lib/netwatch/cache"]
+    restart: "no"
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: nw_backend
+    user: "1000:1000"
+    network_mode: "service:vpn"
+    depends_on:
+      vpn:
+        condition: service_healthy
+      backend-cache-init:
+        condition: service_completed_successfully
+    environment:
+      # Backend, Prowlarr and libtorrent share the VPN namespace, so their local
+      # APIs are reached over loopback instead of a non-VPN Docker bridge.
+      - TORRENT_ENGINE_URL=http://127.0.0.1:8081
+      - PROWLARR_URL=http://127.0.0.1:9696
+      - FLARESOLVERR_URL=http://127.0.0.1:8191
+      - NETWATCH_CACHE_DIR=/var/lib/netwatch/cache
+    env_file:
+      - ../backend/.env
+    volumes:
+      - ./torrent-engine/resolv.conf:/etc/resolv.conf:ro
+      - nw_backend_cache:/var/lib/netwatch/cache
+      - nw_downloads:/tmp/netwatch
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  nw_backend_cache:
+    driver: local
+  nw_downloads:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=8g,uid=1000"

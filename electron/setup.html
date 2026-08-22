@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>NetWatch Setup</title>
+  <link rel="stylesheet" href="./setup.css">
+</head>
+<body>
+  <main class="setup-shell">
+    <header class="setup-header">
+      <div class="setup-brand">
+        <img class="setup-mark" src="../dist/netwatch-icon.png" alt="" aria-hidden="true" draggable="false">
+        <div>
+          <div class="setup-name">NetWatch</div>
+          <div class="setup-caption">Setup</div>
+        </div>
+      </div>
+      <div class="setup-steps" aria-label="Setup progress">
+        <span id="stageVpn" class="setup-stage active">VPN</span>
+        <span id="stageApi" class="setup-stage">APIs</span>
+        <span class="setup-stage">Prowlarr</span>
+      </div>
+    </header>
+
+    <section class="setup-content">
+      <div id="wgStep" class="step">
+        <div class="step-heading">
+          <div>
+            <div class="step-kicker">Step 1</div>
+            <h1>VPN</h1>
+          </div>
+          <span id="wgState" class="state-chip">Required</span>
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-title">WireGuard configuration</div>
+            <div id="wgConfigHint" class="setting-hint">Import your provider .conf file</div>
+          </div>
+          <div class="row-actions">
+            <button id="importWg" class="button primary">Import .conf</button>
+            <button id="replaceWg" class="button secondary">Replace</button>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-title">Private tunnel</div>
+            <div id="vpnHint" class="setting-hint">Not verified</div>
+          </div>
+          <button id="verifyVpn" class="button primary">Verify</button>
+        </div>
+      </div>
+
+      <div id="apiStep" class="step">
+        <div class="step-heading">
+          <div>
+            <div class="step-kicker">Step 2</div>
+            <h1>API keys</h1>
+          </div>
+        </div>
+
+        <div class="api-list" id="apiFields">
+          <div class="api-row field" data-key="tmdb">
+            <div class="api-label"><label for="tmdb">TMDB</label><button class="text-action" data-site="tmdb">Get key</button></div>
+            <input id="tmdb" type="password" autocomplete="off" spellcheck="false" maxlength="256" placeholder="API key">
+          </div>
+          <div class="api-row field" data-key="opensubtitles">
+            <div class="api-label"><label for="opensubtitles">OpenSubtitles</label><button class="text-action" data-site="opensubtitles">Get key</button></div>
+            <input id="opensubtitles" type="password" autocomplete="off" spellcheck="false" maxlength="256" placeholder="API key">
+          </div>
+          <div class="api-row field" data-key="subdl">
+            <div class="api-label"><label for="subdl">SubDL</label><button class="text-action" data-site="subdl">Get key</button></div>
+            <input id="subdl" type="password" autocomplete="off" spellcheck="false" maxlength="256" placeholder="API key">
+          </div>
+        </div>
+
+        <div class="footer-actions"><button id="saveApi" class="button primary wide">Save & verify</button></div>
+      </div>
+
+      <div id="doneStep" class="step">
+        <div class="completion">
+          <span class="completion-dot"></span>
+          <div>
+            <div class="step-kicker">Step 2 complete</div>
+            <h1>Ready for Prowlarr</h1>
+          </div>
+        </div>
+      </div>
+
+      <div id="progress" class="progress" aria-hidden="true"></div>
+      <div id="message" class="message" role="status" aria-live="polite"></div>
+    </section>
+  </main>
+  <script src="./setup-renderer.js"></script>
+</body>
+</html>

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>NetWatch — Prowlarr Setup</title>
+  <link rel="stylesheet" href="./setup.css">
+</head>
+<body>
+  <main class="setup-shell compact-shell">
+    <header class="setup-header">
+      <div class="setup-brand">
+        <img class="setup-mark" src="../dist/netwatch-icon.png" alt="" aria-hidden="true" draggable="false">
+        <div>
+          <div class="setup-name">NetWatch</div>
+          <div class="setup-caption">Setup</div>
+        </div>
+      </div>
+      <div class="setup-steps" aria-label="Setup progress">
+        <span class="setup-stage complete">VPN</span>
+        <span class="setup-stage complete">APIs</span>
+        <span class="setup-stage active">Prowlarr</span>
+      </div>
+    </header>
+
+    <section class="setup-content">
+      <div class="step active">
+        <div class="step-heading">
+          <div>
+            <div class="step-kicker">Step 3</div>
+            <h1>Prowlarr</h1>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-title">Local setup</div>
+            <div class="setting-hint">Finish setup in your browser</div>
+          </div>
+          <button id="openProwlarr" class="button secondary">Open Prowlarr</button>
+        </div>
+
+        <div class="api-row prowlarr-key-row">
+          <div class="api-label"><label for="prowlarrKey">API key</label></div>
+          <input id="prowlarrKey" type="password" autocomplete="off" spellcheck="false" maxlength="256" placeholder="Prowlarr API key">
+        </div>
+
+        <div class="footer-actions"><button id="saveProwlarr" class="button primary wide">Save & finish</button></div>
+      </div>
+
+      <div id="progress" class="progress" aria-hidden="true"></div>
+      <div id="message" class="message" role="status" aria-live="polite"></div>
+    </section>
+  </main>
+  <script src="./prowlarr-setup-renderer.js"></script>
+</body>
+</html>

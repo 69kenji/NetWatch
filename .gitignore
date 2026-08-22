@@ -1,0 +1,71 @@
+# Node / renderer build output
+node_modules/
+dist/
+release/
+.vite/
+.npm/
+
+# Python environments, caches, test output
+.venv/
+venv/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+
+# Logs / crash output
+*.log
+*.log.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS / editor metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+*#Uf03aZone.Identifier
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local backups / temporary files
+*.orig
+*.bak
+*.tmp
+*.temp
+
+# Local security / verification captures and scanner reports
+step13-zap/
+step14-captures/
+*.pcap
+*.pcapng
+*.etl
+
+# Environment files and local secrets. Keep public examples versioned.
+.env
+.env.*
+**/.env
+**/.env.*
+!backend/.env.example
+!**/.env.example
+
+# Runtime service state. These are generated locally and may contain secrets.
+/docker/wireguard/*
+!/docker/wireguard/.gitkeep
+!/docker/wireguard/wg_confs/
+/docker/wireguard/wg_confs/*
+!/docker/wireguard/wg_confs/wg0.conf.example
+/docker/prowlarr/config/*
+!/docker/prowlarr/config/.gitkeep
+
+# Packaged/native player binaries are intentionally versioned because they are
+# required for a complete Windows build. Do not add resources/mpv/ here.

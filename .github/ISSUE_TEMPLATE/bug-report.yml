@@ -1,0 +1,84 @@
+name: Bug report
+description: Report a reproducible NetWatch defect
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Do not paste API keys, WireGuard configuration/private keys, `backend/.env`, Prowlarr databases, authentication tokens, or other secrets. For security vulnerabilities, follow `SECURITY.md` instead of posting exploit details publicly.
+
+  - type: input
+    id: version
+    attributes:
+      label: NetWatch version
+      description: Release version or commit, if known.
+      placeholder: "1.0.0 or commit SHA"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How are you running NetWatch?
+      options:
+        - Packaged Windows application
+        - Source checkout / development build
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest reliable sequence that reproduces the issue.
+      placeholder: |
+        1. Start NetWatch...
+        2. Open...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include relevant Windows 11, Docker Desktop, WSL2, Node, VPN/provider, and GPU details. Redact account identifiers and secrets.
+      placeholder: |
+        Windows 11 build:
+        Docker Desktop version:
+        WSL distro/version:
+        Node version (source builds):
+        Host VPN in use: yes/no
+        Inner WireGuard provider/config type:
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics or logs
+      description: Paste only relevant, redacted output. Never include private configuration or credentials.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I reproduced this on the current release/current source.
+          required: true
+        - label: I removed API keys, tokens, VPN private keys/configuration, and other secrets from this report.
+          required: true
+        - label: This is not a security vulnerability containing exploit details; if it is, I will follow SECURITY.md instead.
+          required: true
