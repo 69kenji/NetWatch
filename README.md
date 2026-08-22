@@ -13,9 +13,19 @@
   <strong>Privacy-focused Windows media client for movies, TV, and anime.</strong>
 </p>
 
+<p align="center">
+  <img
+    src="https://github.com/user-attachments/assets/7e043c70-ec4b-43c3-963a-5912f36b4484"
+    alt="NetWatch home screen"
+    width="800"
+  />
+</p>
+
 NetWatch is a Windows 11 desktop media client built with Electron/React, FastAPI, direct `python-libtorrent`, Prowlarr, WireGuard, FlareSolverr, and native Windows mpv.
 
 Its Internet-facing services share a single Docker network namespace behind an inner WireGuard tunnel. Windows-facing APIs are exposed on loopback only, and loss of the inner VPN is designed to fail closed.
+
+## Architecture
 
 ```text
 Windows Electron / mpv
@@ -31,6 +41,41 @@ backend + torrent engine + Prowlarr + FlareSolverr
         v
      Internet
 ```
+
+## Screenshots
+
+<p align="center">
+  <img
+    src="https://github.com/user-attachments/assets/04395bde-31b2-466a-b282-33bbbcc31f1c"
+    alt="NetWatch Discover screen"
+    width="700"
+  />
+</p>
+
+<p align="center">
+  <img
+    src="https://github.com/user-attachments/assets/a9ab5643-5aaa-4969-b2be-a7b395531cd9"
+    alt="NetWatch series details screen"
+    width="700"
+  />
+</p>
+
+<p align="center">
+  <img
+    src="https://github.com/user-attachments/assets/608c2bfa-d9cd-4afa-a5ab-53589130b4ab"
+    alt="NetWatch anime catalog"
+    width="700"
+  />
+</p>
+
+<p align="center">
+  <img
+    src="https://github.com/user-attachments/assets/00689fee-27ec-42f9-94f4-2ae4d5450fce"
+    alt="NetWatch player"
+    width="700"
+  />
+</p>
+
 
 For the full network/privacy model, see [`docs/network-threat-model.md`](docs/network-threat-model.md).
 
