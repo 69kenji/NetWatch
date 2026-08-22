@@ -42,6 +42,14 @@ Use the white ghost mascot with near-black inner outline and purple-gradient out
 - Media cards show artwork, compact type badge, title, year, and original language. Full metadata belongs on the detail view.
 - The established TV/anime episode browser should not be structurally redesigned without a dedicated review.
 
+## VPN settings
+
+- `Generic WireGuard` and `VPNBook` are profile labels over the same WireGuard security path.
+- Show VPNBook expiry as an estimate/reminder, never as a security verdict.
+- Keep provider switching lightweight; it changes guidance/metadata, not routing.
+- Configuration replacement is explicit and followed by a restart action; do not imply a live tunnel was hot-swapped.
+- Provider-specific links are fixed application actions, not arbitrary renderer URLs.
+
 ## Player
 
 - Preparation/rebuffering is an exclusive backdrop state; normal player chrome stays hidden.

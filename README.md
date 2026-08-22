@@ -17,13 +17,13 @@
   <img
     src="https://github.com/user-attachments/assets/7e043c70-ec4b-43c3-963a-5912f36b4484"
     alt="NetWatch home screen"
-    width="800"
+    width="1000"
   />
 </p>
 
 NetWatch is a Windows 11 desktop media client built with Electron/React, FastAPI, direct `python-libtorrent`, Prowlarr, WireGuard, FlareSolverr, and native Windows mpv.
 
-Its Internet-facing services share a single Docker network namespace behind an inner WireGuard tunnel. Windows-facing APIs are exposed on loopback only, and loss of the inner VPN is designed to fail closed.
+Its Internet-facing services share one Docker network namespace behind an inner WireGuard tunnel. Windows-facing APIs are published on loopback only, and loss of the inner VPN is intended to fail closed.
 
 ## Architecture
 
@@ -42,42 +42,25 @@ backend + torrent engine + Prowlarr + FlareSolverr
      Internet
 ```
 
+For the full network/privacy model, see [`docs/network-threat-model.md`](docs/network-threat-model.md).
+
 ## Screenshots
 
 <p align="center">
-  <img
-    src="https://github.com/user-attachments/assets/04395bde-31b2-466a-b282-33bbbcc31f1c"
-    alt="NetWatch Discover screen"
-    width="700"
-  />
+  <img src="https://github.com/user-attachments/assets/04395bde-31b2-466a-b282-33bbbcc31f1c" alt="NetWatch Discover screen" width="900" />
 </p>
 
 <p align="center">
-  <img
-    src="https://github.com/user-attachments/assets/a9ab5643-5aaa-4969-b2be-a7b395531cd9"
-    alt="NetWatch series details screen"
-    width="700"
-  />
+  <img src="https://github.com/user-attachments/assets/a9ab5643-5aaa-4969-b2be-a7b395531cd9" alt="NetWatch series details screen" width="900" />
 </p>
 
 <p align="center">
-  <img
-    src="https://github.com/user-attachments/assets/608c2bfa-d9cd-4afa-a5ab-53589130b4ab"
-    alt="NetWatch anime catalog"
-    width="700"
-  />
+  <img src="https://github.com/user-attachments/assets/608c2bfa-d9cd-4afa-a5ab-53589130b4ab" alt="NetWatch anime catalog" width="900" />
 </p>
 
 <p align="center">
-  <img
-    src="https://github.com/user-attachments/assets/00689fee-27ec-42f9-94f4-2ae4d5450fce"
-    alt="NetWatch player"
-    width="700"
-  />
+  <img src="https://github.com/user-attachments/assets/00689fee-27ec-42f9-94f4-2ae4d5450fce" alt="NetWatch player" width="900" />
 </p>
-
-
-For the full network/privacy model, see [`docs/network-threat-model.md`](docs/network-threat-model.md).
 
 ## Features
 
@@ -86,7 +69,7 @@ For the full network/privacy model, see [`docs/network-threat-model.md`](docs/ne
 - Direct libtorrent streaming with seek-aware HTTP Range scheduling.
 - Native Windows mpv playback with fullscreen, seeking, audio tracks, subtitles, buffering/recovery, and live network telemetry.
 - OpenSubtitles and SubDL subtitle integration.
-- Inner WireGuard routing, VPN-side DNS, loopback-only host exposure, and startup network verification.
+- Inner WireGuard routing, VPN-side DNS, loopback-only host exposure, startup network verification, and optional VPNBook expiry reminders.
 
 ## Requirements
 
@@ -96,7 +79,7 @@ You will need:
 
 - WSL2 and a normal Linux distribution; Ubuntu is recommended.
 - Docker Desktop using the WSL2 backend and integrated with that distribution.
-- A WireGuard client configuration from your VPN provider.
+- A full-tunnel WireGuard client configuration. Generic providers and VPNBook profiles are supported.
 - TMDB, OpenSubtitles, and SubDL API keys.
 - Prowlarr with at least one usable indexer and its API key.
 
@@ -108,13 +91,17 @@ The Windows installer can guide you through installing or enabling WSL, Ubuntu, 
 
 The packaged setup flow is:
 
-1. Import a provider WireGuard `.conf`.
+1. Select **Generic WireGuard** or **VPNBook**, then import a provider `.conf`.
 2. Verify the inner VPN, kill switch, DNS path, and real egress.
 3. Enter and validate TMDB, OpenSubtitles, and SubDL API keys.
 4. Configure Prowlarr and enter its API key.
 5. Start NetWatch normally.
 
 NetWatch rewrites the imported WireGuard configuration into its own canonical form. Provider command hooks are rejected, a full IPv4 tunnel (`0.0.0.0/0`) is required, and the VPN configuration must provide a usable IPv4 DNS resolver.
+
+VPNBook uses the same WireGuard path; fresh profiles are available from [VPNBook WireGuard](https://www.vpnbook.com/freevpn/wireguard-vpn). Selecting **VPNBook** only enables provider-specific guidance and an estimated seven-day profile-expiry reminder based on local file/import timestamps. It does not change routing or VPN verification.
+
+From **Settings → VPN**, you can switch between **Generic WireGuard** and **VPNBook**, open VPNBook's refresh page, or replace the current `.conf`. Replacements are staged and take effect after restarting NetWatch, when the normal fail-closed VPN verification runs again.
 
 Secrets are stored in the selected WSL distribution under `~/.local/share/netwatch/config/`, not in the Windows application directory or source tree.
 
@@ -128,10 +115,14 @@ Packaged state lives under:
 ├── config/
 │   ├── backend.env                 API credentials
 │   ├── resolv.conf                 VPN-side DNS
-│   └── wireguard/wg_confs/wg0.conf
+│   └── wireguard/wg_confs/
+│       ├── wg0.conf                active canonical profile
+│       └── wg0.pending.conf        staged replacement, when present
 └── data/
     ├── prowlarr/
     ├── backend-cache/
+    ├── vpn-profile.json            provider/reminder metadata only
+    ├── vpn-profile.pending.json    staged replacement metadata, when present
     └── setup.log
 ```
 
@@ -171,7 +162,7 @@ npm run package:win
 The release artifact is written as:
 
 ```text
-release\NetWatch-Setup-1.0.0.exe
+release\NetWatch-Setup-1.0.1.exe
 ```
 
 Use `npm ci` for reproducible builds. Do not replace it with `npm install` and do not use `npm audit fix --force`.
@@ -269,6 +260,9 @@ Use **Open Prowlarr**, finish its local setup, configure at least one usable ind
 
 **VPN/DNS verification fails**  
 Run `docker/verify-networking.py`. Do not work around a failure by giving backend, torrent-engine, Prowlarr, or FlareSolverr an independent Docker egress path.
+
+**VPNBook expiry is unknown or near expiry**  
+Open **Settings → VPN**. Use **Get new VPNBook config** if needed, then **Replace configuration** and restart NetWatch. The countdown is an estimate only; live VPN verification remains authoritative.
 
 **The Windows host VPN was changed while NetWatch was running**  
 Restart NetWatch. Host-VPN transitions can leave Docker/WSL networking unavailable; the validated failure mode remains fail-closed.

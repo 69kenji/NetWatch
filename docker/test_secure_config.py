@@ -2,6 +2,7 @@ import base64
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -202,6 +203,91 @@ class SecureConfigTests(unittest.TestCase):
             self.assertTrue(state["pending"]["prowlarr"])
             self.assertFalse(state["complete"])
             self.assertEqual(state["permissions"]["modes"]["pending_prowlarr"], "600")
+
+
+    def test_vpnbook_profile_uses_earliest_file_timestamp_for_estimated_expiry(self):
+        now = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
+        created = now - timedelta(hours=5)
+        modified = now - timedelta(hours=3)
+        profile = secure_config.normalize_vpn_profile_payload({
+            "profile_type": "vpnbook",
+            "imported_at": now.isoformat(),
+            "source_created_at": created.isoformat(),
+            "source_modified_at": modified.isoformat(),
+        }, now=now)
+        view = secure_config.vpn_profile_view(profile)
+        self.assertEqual(view["profile_type"], "vpnbook")
+        self.assertEqual(view["estimated_created_at"], created.isoformat())
+        self.assertEqual(view["estimated_expires_at"], (created + timedelta(days=7)).isoformat())
+        self.assertEqual(view["expiry_basis"], "file_creation_time")
+
+    def test_generic_profile_preserves_timestamps_without_expiry(self):
+        now = datetime.now(timezone.utc)
+        profile = secure_config.normalize_vpn_profile_payload({
+            "profile_type": "generic",
+            "imported_at": now.isoformat(),
+            "source_created_at": (now - timedelta(hours=1)).isoformat(),
+            "source_modified_at": now.isoformat(),
+        }, now=now)
+        view = secure_config.vpn_profile_view(profile)
+        self.assertEqual(view["profile_type"], "generic")
+        self.assertIsNone(view["estimated_expires_at"])
+        self.assertIsNone(view["expiry_basis"])
+
+    def test_legacy_profile_type_switch_has_unknown_expiry_without_import_metadata(self):
+        view = secure_config.vpn_profile_view({
+            "profile_type": "vpnbook",
+            "imported_at": None,
+            "source_created_at": None,
+            "source_modified_at": None,
+        })
+        self.assertIsNone(view["estimated_created_at"])
+        self.assertIsNone(view["estimated_expires_at"])
+
+    def test_vpn_profile_metadata_mode_is_repaired_and_private(self):
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root) / "netwatch"
+            paths = secure_config.ensure_dirs(base)
+            profile_path = paths["data"] / "vpn-profile.json"
+            secure_config.write_vpn_profile(profile_path, {
+                "profile_type": "vpnbook",
+                "imported_at": datetime.now(timezone.utc).isoformat(),
+                "source_created_at": None,
+                "source_modified_at": None,
+            })
+            os.chmod(profile_path, 0o644)
+            state = secure_config.inspect_state(base)
+            self.assertEqual(state["permissions"]["modes"]["vpn_profile"], "600")
+            self.assertTrue(state["permissions"]["files_secure"])
+
+
+    def test_staged_wireguard_promotes_on_bootstrap_and_requires_vpn_reverification(self):
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root) / "netwatch"
+            paths = secure_config.ensure_dirs(base)
+            pending = secure_config.pending_wireguard_paths(paths)
+            parsed = secure_config.parse_wireguard(valid_config(), allow_netwatch_hooks=False)
+            secure_config.atomic_write(pending["wg"], secure_config.render_wireguard(parsed), 0o600)
+            secure_config.write_vpn_profile(pending["profile"], {
+                "profile_type": "vpnbook",
+                "imported_at": datetime.now(timezone.utc).isoformat(),
+                "source_created_at": None,
+                "source_modified_at": None,
+            })
+            secure_config.promote_pending_wireguard(base)
+            self.assertTrue((paths["wg_confs"] / "wg0.conf").exists())
+            self.assertTrue(pending["marker"].exists())
+            self.assertFalse(pending["wg"].exists())
+            self.assertFalse(pending["profile"].exists())
+            state = secure_config.inspect_state(base)
+            self.assertTrue(state["pending"]["vpn"] )
+            self.assertFalse(state["complete"])
+            self.assertEqual(state["vpn_profile"]["profile_type"], "vpnbook")
+
+    def test_vpn_profile_rejects_unknown_type(self):
+        with self.assertRaises(secure_config.ConfigError) as ctx:
+            secure_config.normalize_vpn_profile_payload({"profile_type": "other"})
+        self.assertEqual(ctx.exception.code, "VPN_PROFILE_INVALID")
 
     def test_wireguard_input_limit_is_8_kib(self):
         self.assertEqual(secure_config.MAX_WG_BYTES, 8 * 1024)

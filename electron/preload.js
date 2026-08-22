@@ -17,6 +17,11 @@ contextBridge.exposeInMainWorld('electron', {
     getStatus: () => ipcRenderer.invoke('runtime:get-status'),
     retry: () => ipcRenderer.invoke('runtime:retry'),
     vpnSanity: () => ipcRenderer.invoke('runtime:vpn-sanity'),
+    getVpnProfile: () => ipcRenderer.invoke('runtime:get-vpn-profile'),
+    setVpnProfileType: (profileType) => ipcRenderer.invoke('runtime:set-vpn-profile-type', profileType),
+    replaceWireGuard: (profileType) => ipcRenderer.invoke('runtime:replace-wireguard', profileType),
+    openVpnBook: () => ipcRenderer.invoke('runtime:open-vpnbook'),
+    restartApp: () => ipcRenderer.invoke('runtime:restart-app'),
     onStatus: (callback) => subscribe('runtime:status', callback),
   },
   player: {

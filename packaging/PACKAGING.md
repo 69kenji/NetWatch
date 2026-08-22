@@ -26,10 +26,10 @@ Then build the installer:
 npm run package:win
 ```
 
-For 1.0.0 the installer is:
+For 1.0.1 the installer is:
 
 ```text
-release\NetWatch-Setup-1.0.0.exe
+release\NetWatch-Setup-1.0.1.exe
 ```
 
 ## Installer behavior
@@ -56,10 +56,20 @@ Packaged state is kept in WSL:
 
 ```text
 ~/.local/share/netwatch/
-├── runtime/       regenerated from the installed application
-├── config/        private VPN/API configuration
-└── data/          persistent Prowlarr/cache/setup state
+├── runtime/                         regenerated from the installed application
+├── config/
+│   ├── backend.env                 API credentials
+│   ├── resolv.conf                 VPN-side DNS
+│   └── wireguard/wg_confs/
+│       ├── wg0.conf                active canonical WireGuard profile
+│       └── wg0.pending.conf        staged replacement, when present
+└── data/
+    ├── vpn-profile.json            provider/reminder metadata only
+    ├── vpn-profile.pending.json    staged replacement metadata, when present
+    └── ...                         Prowlarr/cache/setup state
 ```
+
+VPNBook provider metadata and expiry estimates contain no WireGuard key material. A replacement profile is staged with private permissions and promoted on restart before the normal VPN verification gate; the running tunnel is not hot-swapped.
 
 Normal uninstall removes the Windows application but intentionally preserves `config/` and `data/`. It also does not uninstall Docker Desktop, disable WSL, or unregister the user's Linux distribution.
 
@@ -77,7 +87,7 @@ Before publishing an installer:
 
 1. Build from a clean NTFS checkout with `npm ci`.
 2. Test the unpacked application.
-3. Build and test `NetWatch-Setup-1.0.0.exe` through install/reinstall/uninstall/reinstall.
+3. Build and test `NetWatch-Setup-1.0.1.exe` through install/reinstall/uninstall/reinstall.
 4. Confirm expected WSL private state survives normal uninstall/reinstall.
 5. Confirm installed resources contain the license/notices and mpv provenance files.
 6. Hash the source ZIP and installer.

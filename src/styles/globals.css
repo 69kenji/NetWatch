@@ -2548,3 +2548,68 @@ body, button, input, select, textarea {
   .nw-discover-controls label,
   .nw-discover-controls label:last-child { flex: 1 1 150px; min-width: 0; }
 }
+
+/* ── VPN profile metadata / renewal controls ─────────────────────────── */
+.nw-vpn-profile-controls {
+  width: min(620px, 100%);
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+.nw-vpn-profile-controls > label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.nw-vpn-profile-controls > label > span,
+.nw-vpn-expiry > span {
+  color: #68646f;
+  font-size: 9px;
+}
+.nw-vpn-profile-select {
+  width: 174px;
+  flex: 0 0 auto;
+}
+.nw-vpn-expiry,
+.nw-vpn-restart-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255,255,255,0.055);
+  border-radius: var(--r-md);
+}
+.nw-vpn-expiry strong,
+.nw-vpn-restart-notice strong {
+  font-size: 10px;
+}
+.nw-vpn-expiry small,
+.nw-vpn-restart-notice small {
+  color: #57535f;
+  font-size: 8px;
+  line-height: 1.45;
+}
+.nw-vpn-expiry.is-warning {
+  border-color: rgba(238,182,95,0.18);
+}
+.nw-vpn-expiry.is-warning strong { color: #d6ae6d; }
+.nw-vpn-restart-notice {
+  border-color: rgba(123,97,255,0.18);
+}
+.nw-vpn-profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.nw-vpn-profile-error {
+  color: #d98089 !important;
+  line-height: 1.45;
+}
+
+@media (max-width: 680px) {
+  .nw-vpn-profile-controls > label { align-items: flex-start; flex-direction: column; gap: 7px; }
+  .nw-vpn-profile-select { width: 100%; }
+  .nw-vpn-profile-actions { width: 100%; }
+  .nw-vpn-profile-actions .btn { flex: 1 1 160px; }
+}

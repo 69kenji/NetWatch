@@ -36,6 +36,20 @@
 
         <div class="setting-row">
           <div>
+            <div class="setting-title">VPN provider</div>
+            <div id="profileHint" class="setting-hint">Provider selection only controls guidance; routing stays WireGuard</div>
+          </div>
+          <div class="row-actions profile-actions">
+            <select id="vpnProfileType" class="setup-select" aria-label="VPN profile type">
+              <option value="generic">Generic WireGuard</option>
+              <option value="vpnbook">VPNBook</option>
+            </select>
+            <button id="getVpnBook" class="button secondary" type="button">Get config</button>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div>
             <div class="setting-title">WireGuard configuration</div>
             <div id="wgConfigHint" class="setting-hint">Import your provider .conf file</div>
           </div>
@@ -84,8 +98,8 @@
         <div class="completion">
           <span class="completion-dot"></span>
           <div>
-            <div class="step-kicker">Step 2 complete</div>
-            <h1>Ready for Prowlarr</h1>
+            <div id="doneKicker" class="step-kicker">Step 2 complete</div>
+            <h1 id="doneTitle">Ready for Prowlarr</h1>
           </div>
         </div>
       </div>

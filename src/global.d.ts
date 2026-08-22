@@ -105,6 +105,17 @@ interface NetWatchRuntimeStatus {
 }
 
 
+interface NetWatchVpnProfile {
+  profile_type: 'generic' | 'vpnbook'
+  imported_at?: string | null
+  source_created_at?: string | null
+  source_modified_at?: string | null
+  estimated_created_at?: string | null
+  estimated_expires_at?: string | null
+  expiry_basis?: 'file_creation_time' | 'file_modification_time' | 'import_time' | string | null
+  replacement_pending?: boolean
+}
+
 interface NetWatchVpnSanityResult {
   status: 'ok' | 'unsafe' | 'error' | string
   connected: boolean
@@ -132,6 +143,15 @@ interface Window {
       getStatus: () => Promise<NetWatchRuntimeStatus>
       retry: () => Promise<NetWatchRuntimeStatus>
       vpnSanity: () => Promise<NetWatchVpnSanityResult>
+      getVpnProfile: () => Promise<NetWatchVpnProfile>
+      setVpnProfileType: (profileType: 'generic' | 'vpnbook') => Promise<NetWatchVpnProfile>
+      replaceWireGuard: (profileType: 'generic' | 'vpnbook') => Promise<{
+        cancelled: boolean
+        profile: NetWatchVpnProfile
+        restart_required: boolean
+      }>
+      openVpnBook: () => Promise<{ opened: boolean }>
+      restartApp: () => Promise<{ restarting: boolean }>
       onStatus: (callback: (status: NetWatchRuntimeStatus) => void) => () => void
     }
     player: {

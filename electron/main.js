@@ -6,6 +6,7 @@ const fs = require('fs')
 const { MpvController } = require('./mpv-controller')
 const { METADATA_PREPARATION_TIMEOUT_MS, metadataPreparationTimedOut } = require('./preparation-policy')
 const { playerFullscreenShortcutAction } = require('./player-shortcuts')
+const { VPNBOOK_REFRESH_URL, normalizeVpnProfileType, wireGuardFileTimestamps } = require('./vpn-profile')
 
 // Keep this copied development Electron build away from Electron's shared/default
 // cache directories. Multiple local Electron copies can otherwise contend for the
@@ -602,7 +603,10 @@ async function readWireGuardImportFile(filePath) {
       throw new Error('The selected WireGuard configuration exceeds the 8 KiB size limit.')
     }
 
-    return Buffer.from(staging.subarray(0, bytesRead))
+    return {
+      bytes: Buffer.from(staging.subarray(0, bytesRead)),
+      timestamps: wireGuardFileTimestamps(openedInfo),
+    }
   } catch (error) {
     if (error instanceof Error && /^The selected WireGuard configuration/u.test(error.message)) throw error
     throw new Error('The selected WireGuard configuration could not be read.')
@@ -611,6 +615,50 @@ async function readWireGuardImportFile(filePath) {
     if (handle) {
       try { await handle.close() } catch (_) {}
     }
+  }
+}
+
+async function chooseAndImportWireGuard(parentWindow, profileType, { confirmReplace = false, stageOnly = false } = {}) {
+  const normalizedType = normalizeVpnProfileType(profileType)
+  if (confirmReplace) {
+    const confirmation = await dialog.showMessageBox(parentWindow, {
+      type: 'warning',
+      buttons: ['Keep current configuration', 'Replace configuration'],
+      defaultId: 0,
+      cancelId: 0,
+      title: 'Replace WireGuard configuration?',
+      message: 'Replace the existing private WireGuard configuration?',
+      detail: 'NetWatch will only overwrite it after the newly selected provider file passes strict validation.',
+      noLink: true,
+    })
+    if (confirmation.response !== 1) return { cancelled: true }
+  }
+
+  const selection = await dialog.showOpenDialog(parentWindow, {
+    title: 'Choose VPN provider WireGuard configuration',
+    properties: ['openFile'],
+    filters: [
+      { name: 'WireGuard configuration', extensions: ['conf'] },
+      { name: 'Text files', extensions: ['txt'] },
+    ],
+  })
+  if (selection.canceled || selection.filePaths.length !== 1) return { cancelled: true }
+
+  await logSetupEvent('WG_IMPORT_STARTED')
+  let providerConfig = null
+  try {
+    const imported = await readWireGuardImportFile(selection.filePaths[0])
+    providerConfig = imported.bytes
+    const action = stageOnly ? 'stage-wireguard' : 'import-wireguard'
+    const secureResult = await secureConfigAction(action, {
+      rawInput: providerConfig,
+      args: [normalizedType, imported.timestamps.sourceCreatedAt, imported.timestamps.sourceModifiedAt],
+      timeoutMs: 20_000,
+    })
+    providerConfig = null // secureConfigAction owns and zeroes the buffer.
+    return { cancelled: false, profile: secureResult.vpn_profile || null }
+  } finally {
+    if (providerConfig) providerConfig.fill(0)
   }
 }
 
@@ -809,6 +857,8 @@ const PROWLARR_LOCAL_URL = 'http://127.0.0.1:9696/'
 const SETUP_CHANNELS = [
   'setup:get-state',
   'setup:choose-wireguard',
+  'setup:set-vpn-profile-type',
+  'setup:open-vpnbook',
   'setup:verify-vpn',
   'setup:submit-api',
   'setup:open-credential-site',
@@ -882,6 +932,24 @@ async function setupStateForRenderer() {
   return { ...state, vpn_verified: setupVpnVerified }
 }
 
+async function vpnProfileForRenderer() {
+  const state = await inspectSecureSetupState()
+  const staged = state?.vpn_replacement?.staged ? state.vpn_replacement.profile : null
+  if (staged) return { ...staged, replacement_pending: true }
+  return { ...(state?.vpn_profile || { profile_type: 'generic' }), replacement_pending: false }
+}
+
+async function setVpnProfileType(profileType) {
+  const state = await inspectSecureSetupState()
+  if (state?.vpn_replacement?.staged) {
+    throw new Error('Restart NetWatch before changing the VPN profile type again.')
+  }
+  const result = await secureConfigAction('set-vpn-profile-type', {
+    payload: { profile_type: normalizeVpnProfileType(profileType) },
+  })
+  return { ...(result.vpn_profile || await vpnProfileForRenderer()), replacement_pending: false }
+}
+
 async function forceRecreateSetupServices(serviceNames, timeoutMs = 240_000) {
   const args = ['up', '-d', '--force-recreate']
   if (app.isPackaged && packagedRuntimeUpdated) args.push('--build')
@@ -928,6 +996,7 @@ async function verifySetupVpn() {
     throw new Error('VPN egress or VPN-routed DNS verification failed. There is no bypass option.')
   }
 
+  await secureConfigAction('mark-vpn-validated')
   setupVpnVerified = true
   await logSetupEvent('VPN_VERIFIED')
   return setupStateForRenderer()
@@ -1023,7 +1092,7 @@ function closeProwlarrSetupWindow() {
 function scheduleProwlarrSetupIfReady(state) {
   const configured = state?.env?.configured || {}
   const apiComplete = Boolean(configured.tmdb && configured.opensubtitles && configured.subdl)
-  if (!apiComplete || state?.pending?.api) return
+  if (!apiComplete || configured.prowlarr || state?.pending?.api) return
   setTimeout(() => {
     void createProwlarrSetupWindow().then(() => closeSetupWindow())
   }, 350)
@@ -1035,52 +1104,25 @@ function registerSetupHandlers() {
     assertWindowSender(event, setupWindow, 'setup', setupWindowUrl('setup.html'))
     return setupStateForRenderer()
   })
-  ipcMain.handle('setup:choose-wireguard', async event => {
+  ipcMain.handle('setup:choose-wireguard', async (event, profileType) => {
     assertWindowSender(event, setupWindow, 'setup', setupWindowUrl('setup.html'))
     const current = await inspectSecureSetupState()
-    if (current?.wg?.valid) {
-      const confirmation = await dialog.showMessageBox(setupWindow, {
-        type: 'warning',
-        buttons: ['Keep current configuration', 'Replace configuration'],
-        defaultId: 0,
-        cancelId: 0,
-        title: 'Replace WireGuard configuration?',
-        message: 'Replace the existing private WireGuard configuration?',
-        detail: 'NetWatch will only overwrite it after the newly selected provider file passes strict validation.',
-        noLink: true,
-      })
-      if (confirmation.response !== 1) return { cancelled: true, state: await setupStateForRenderer() }
-    }
-
-    const selection = await dialog.showOpenDialog(setupWindow, {
-      title: 'Choose VPN provider WireGuard configuration',
-      properties: ['openFile'],
-      filters: [
-        { name: 'WireGuard configuration', extensions: ['conf'] },
-        { name: 'Text files', extensions: ['txt'] },
-      ],
-    })
-    if (selection.canceled || selection.filePaths.length !== 1) {
-      return { cancelled: true, state: await setupStateForRenderer() }
-    }
-
-    await logSetupEvent('WG_IMPORT_STARTED')
-    let providerConfig = null
-    try {
-      // Read the user-selected file in the Windows main process and pass only
-      // its bounded bytes over stdin to the fixed WSL helper. This works for
-      // local paths as well as Hyper-V/RDP redirected or UNC-backed files and
-      // avoids exposing the provider path or private key on a process command line.
-      providerConfig = await readWireGuardImportFile(selection.filePaths[0])
-      await secureConfigAction('import-wireguard', { rawInput: providerConfig, timeoutMs: 20_000 })
-      providerConfig = null // secureConfigAction owns and zeroes the buffer.
-    } finally {
-      if (providerConfig) providerConfig.fill(0)
-    }
+    const result = await chooseAndImportWireGuard(setupWindow, profileType, { confirmReplace: Boolean(current?.wg?.valid) })
+    if (result.cancelled) return { cancelled: true, state: await setupStateForRenderer() }
     setupVpnVerified = false
     await logSetupEvent('WG_CONFIG_VALIDATED')
     await logSetupEvent('CONFIG_PERMISSIONS_VERIFIED')
     return { cancelled: false, state: await setupStateForRenderer() }
+  })
+  ipcMain.handle('setup:set-vpn-profile-type', async (event, profileType) => {
+    assertWindowSender(event, setupWindow, 'setup', setupWindowUrl('setup.html'))
+    await setVpnProfileType(profileType)
+    return { ok: true, state: await setupStateForRenderer() }
+  })
+  ipcMain.handle('setup:open-vpnbook', async event => {
+    assertWindowSender(event, setupWindow, 'setup', setupWindowUrl('setup.html'))
+    await shell.openExternal(VPNBOOK_REFRESH_URL)
+    return { opened: true }
   })
   ipcMain.handle('setup:verify-vpn', async event => {
     assertWindowSender(event, setupWindow, 'setup', setupWindowUrl('setup.html'))
@@ -1095,6 +1137,12 @@ function registerSetupHandlers() {
         scheduleProwlarrSetupIfReady(state)
       }
     }
+    const configured = state?.env?.configured || {}
+    const alreadyConfigured = Boolean(
+      configured.tmdb && configured.opensubtitles && configured.subdl && configured.prowlarr
+      && !state?.pending?.api && !state?.pending?.prowlarr && !state?.pending?.vpn
+    )
+    if (alreadyConfigured) setTimeout(() => { void finishFirstRun() }, 350)
     return { ok: true, state }
   })
   ipcMain.handle('setup:submit-api', async (event, payload) => {
@@ -1274,8 +1322,9 @@ async function beginPackagedFirstRun(setupState) {
   const prowlarrComplete = Boolean(configured.prowlarr)
   const pendingApi = Boolean(setupState?.pending?.api)
   const pendingProwlarr = Boolean(setupState?.pending?.prowlarr)
+  const pendingVpn = Boolean(setupState?.pending?.vpn)
 
-  if (!setupState?.wg?.valid || !apiComplete || pendingApi) {
+  if (!setupState?.wg?.valid || !apiComplete || pendingApi || pendingVpn) {
     await createSetupWindow()
     return true
   }
@@ -2551,6 +2600,33 @@ ipcMain.on('window:close', () => mainWindow?.close())
 ipcMain.handle('runtime:get-status', () => ({ ...runtimeStatus, services: { ...runtimeStatus.services } }))
 ipcMain.handle('runtime:retry', () => retryRuntime())
 ipcMain.handle('runtime:vpn-sanity', () => vpnSanityCheck())
+ipcMain.handle('runtime:get-vpn-profile', async event => {
+  assertWindowSender(event, mainWindow, 'main renderer', rendererUrl())
+  return vpnProfileForRenderer()
+})
+ipcMain.handle('runtime:set-vpn-profile-type', async (event, profileType) => {
+  assertWindowSender(event, mainWindow, 'main renderer', rendererUrl())
+  return setVpnProfileType(profileType)
+})
+ipcMain.handle('runtime:replace-wireguard', async (event, profileType) => {
+  assertWindowSender(event, mainWindow, 'main renderer', rendererUrl())
+  const result = await chooseAndImportWireGuard(mainWindow, profileType, { confirmReplace: true, stageOnly: true })
+  if (result.cancelled) return { cancelled: true, profile: await vpnProfileForRenderer(), restart_required: false }
+  await logSetupEvent('WG_CONFIG_VALIDATED')
+  await logSetupEvent('CONFIG_PERMISSIONS_VERIFIED')
+  return { cancelled: false, profile: { ...(result.profile || await vpnProfileForRenderer()), replacement_pending: true }, restart_required: true }
+})
+ipcMain.handle('runtime:open-vpnbook', async event => {
+  assertWindowSender(event, mainWindow, 'main renderer', rendererUrl())
+  await shell.openExternal(VPNBOOK_REFRESH_URL)
+  return { opened: true }
+})
+ipcMain.handle('runtime:restart-app', event => {
+  assertWindowSender(event, mainWindow, 'main renderer', rendererUrl())
+  app.relaunch()
+  app.quit()
+  return { restarting: true }
+})
 
 // Native mpv player control. React never receives raw ipcRenderer or raw mpv IPC access.
 ipcMain.handle('player:open-torrent', (_, payload) => openTorrentSession(payload))

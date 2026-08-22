@@ -10,14 +10,14 @@ This is a traffic-isolation design, not an anonymity system.
 
 ## Security goals
 
-NetWatch 1.0 is designed so that:
+NetWatch 1.0.x is designed so that:
 
 - Windows-side NetWatch components use localhost/IPC rather than direct Internet connections.
 - Backend, torrent-engine, Prowlarr, and FlareSolverr share the VPN service's network namespace.
 - Ordinary Internet traffic from that namespace leaves through `wg0`.
 - WireGuard failure blocks application traffic instead of falling back to Docker's normal egress.
 - DNS uses the VPN-side resolver supplied by the imported WireGuard configuration.
-- IPv6 is disabled in the VPN namespace for 1.0.
+- IPv6 is disabled in the VPN namespace for 1.0.x.
 - Host-facing APIs bind to `127.0.0.1` only.
 
 ## Non-goals
@@ -83,6 +83,12 @@ NetWatch relies on Windows, WSL2, and Docker Desktop to enforce process, namespa
 
 `nw_vpn` is the authoritative egress boundary. The VPN container retains the network administration capability required to configure WireGuard and firewall/routing policy; application containers do not receive independent egress networks.
 
+### VPN profile metadata
+
+`Generic WireGuard` and `VPNBook` use the same canonical WireGuard parser, routing, kill switch, and live verification. The selected provider label and VPNBook expiry estimate are UX metadata only and cannot make a failing tunnel pass the security gate.
+
+WireGuard replacements are staged privately and promoted on restart. The promoted tunnel must pass the normal live VPN verification before setup is considered complete.
+
 ### External services
 
 VPN infrastructure, trackers, peers, indexers, metadata providers, subtitle providers, and other Internet endpoints are external and untrusted. NetWatch cannot guarantee their availability or correctness.
@@ -114,7 +120,7 @@ NetWatch does not intentionally fall back to Windows DNS, Docker's embedded reso
 
 ## IPv6
 
-IPv6 is disabled in the VPN namespace for NetWatch 1.0. The release model therefore assumes IPv4 application traffic over WireGuard rather than maintaining a second fail-closed IPv6 routing policy.
+IPv6 is disabled in the VPN namespace for NetWatch 1.0.x. The release model therefore assumes IPv4 application traffic over WireGuard rather than maintaining a second fail-closed IPv6 routing policy.
 
 ## Optional Windows host VPN
 
@@ -134,7 +140,7 @@ Changing/disconnecting/reconnecting the host VPN while NetWatch is running can l
 
 ## Release verification
 
-The 1.0 network model was verified with packet capture, process/socket inspection, routing/firewall inspection, and deliberate failure tests.
+The 1.0.x network model was verified with packet capture, process/socket inspection, routing/firewall inspection, and deliberate failure tests.
 
 Observed properties included:
 
@@ -156,7 +162,7 @@ Failure testing produced the following results:
 | Host VPN changed while NetWatch ran | No leak observed; restart may be required |
 | Same exact host/inner relay | Unreliable; unsupported configuration |
 
-These results describe the tested 1.0 architecture, not every possible future Windows/Docker/VPN environment.
+These results describe the tested 1.0.x architecture, not every possible future Windows/Docker/VPN environment.
 
 ## Preserving the model
 

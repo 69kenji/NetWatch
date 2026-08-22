@@ -9,7 +9,7 @@ import re
 import stat
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Secret material created by this helper must never inherit a permissive caller
@@ -18,6 +18,9 @@ os.umask(0o077)
 
 MAX_WG_BYTES = 8 * 1024
 MAX_SECRET_INPUT_BYTES = 16 * 1024
+MAX_VPN_PROFILE_BYTES = 4 * 1024
+VPN_PROFILE_TYPES = {"generic", "vpnbook"}
+VPNBOOK_CONFIG_LIFETIME = timedelta(days=7)
 API_KEYS = {
     "tmdb": "TMDB_API_KEY",
     "opensubtitles": "OPENSUBTITLES_API_KEY",
@@ -178,6 +181,102 @@ def parse_env(path: Path) -> tuple[dict[str, str], bool]:
 def configured_secret(value: str | None) -> bool:
     value = (value or "").strip()
     return bool(value and not value.lower().startswith("your_"))
+
+
+def parse_optional_utc_timestamp(value: object) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or len(value) > 64:
+        raise ConfigError("VPN_PROFILE_INVALID", "VPN profile timestamp is invalid.")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ConfigError("VPN_PROFILE_INVALID", "VPN profile timestamp is invalid.") from exc
+    if parsed.tzinfo is None:
+        raise ConfigError("VPN_PROFILE_INVALID", "VPN profile timestamp must include a timezone.")
+    return parsed.astimezone(timezone.utc)
+
+
+def normalize_vpn_profile_payload(payload: object, *, now: datetime | None = None) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise ConfigError("VPN_PROFILE_INVALID", "VPN profile metadata is invalid.")
+    allowed = {"profile_type", "imported_at", "source_created_at", "source_modified_at"}
+    if any(key not in allowed for key in payload):
+        raise ConfigError("VPN_PROFILE_INVALID", "VPN profile metadata contains an unsupported field.")
+    profile_type = payload.get("profile_type", "generic")
+    if profile_type not in VPN_PROFILE_TYPES:
+        raise ConfigError("VPN_PROFILE_INVALID", "VPN profile type is invalid.")
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    imported = parse_optional_utc_timestamp(payload.get("imported_at"))
+    created = parse_optional_utc_timestamp(payload.get("source_created_at"))
+    modified = parse_optional_utc_timestamp(payload.get("source_modified_at"))
+    # File metadata is only an estimate. Ignore timestamps implausibly far in the future
+    # rather than letting a bad filesystem clock create a misleading long-lived profile.
+    future_limit = now + timedelta(minutes=5)
+    if created and created > future_limit:
+        created = None
+    if modified and modified > future_limit:
+        modified = None
+    return {
+        "profile_type": profile_type,
+        "imported_at": imported.isoformat() if imported else None,
+        "source_created_at": created.isoformat() if created else None,
+        "source_modified_at": modified.isoformat() if modified else None,
+    }
+
+
+def vpn_profile_view(profile: dict[str, object] | None) -> dict[str, object]:
+    if not profile:
+        return {
+            "profile_type": "generic",
+            "imported_at": None,
+            "source_created_at": None,
+            "source_modified_at": None,
+            "estimated_created_at": None,
+            "estimated_expires_at": None,
+            "expiry_basis": None,
+        }
+    normalized = normalize_vpn_profile_payload(profile)
+    imported = parse_optional_utc_timestamp(normalized.get("imported_at"))
+    created = parse_optional_utc_timestamp(normalized.get("source_created_at"))
+    modified = parse_optional_utc_timestamp(normalized.get("source_modified_at"))
+    candidates = [item for item in (created, modified, imported) if item is not None]
+    estimated_created = min(candidates) if candidates else None
+    estimated_expires = None
+    expiry_basis = None
+    if normalized["profile_type"] == "vpnbook" and estimated_created is not None:
+        estimated_expires = estimated_created + VPNBOOK_CONFIG_LIFETIME
+        if estimated_created == created:
+            expiry_basis = "file_creation_time"
+        elif estimated_created == modified:
+            expiry_basis = "file_modification_time"
+        else:
+            expiry_basis = "import_time"
+    return {
+        **normalized,
+        "estimated_created_at": estimated_created.isoformat() if estimated_created else None,
+        "estimated_expires_at": estimated_expires.isoformat() if estimated_expires else None,
+        "expiry_basis": expiry_basis,
+    }
+
+
+def read_vpn_profile(path: Path) -> dict[str, object] | None:
+    if not path.exists():
+        return None
+    reject_symlink(path, kind="private VPN profile metadata file")
+    if not path.is_file() or path.stat().st_size > MAX_VPN_PROFILE_BYTES:
+        return None
+    os.chmod(path, 0o600)
+    try:
+        payload = json.loads(path.read_text("utf-8"))
+        return normalize_vpn_profile_payload(payload)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ConfigError):
+        return None
+
+
+def write_vpn_profile(path: Path, profile: dict[str, object]) -> None:
+    normalized = normalize_vpn_profile_payload(profile)
+    atomic_write(path, (json.dumps(normalized, separators=(",", ":")) + "\n").encode("utf-8"), 0o600)
 
 
 def update_env_keys(path: Path, updates: dict[str, str]) -> None:
@@ -445,6 +544,44 @@ def remove_private_file(path: Path) -> None:
         pass
 
 
+def pending_wireguard_paths(paths: dict[str, Path]) -> dict[str, Path]:
+    return {
+        "wg": paths["wg_confs"] / "wg0.pending.conf",
+        "profile": paths["data"] / "vpn-profile.pending.json",
+        "marker": paths["data"] / ".setup-vpn-pending",
+    }
+
+
+def promote_pending_wireguard(base: Path) -> None:
+    paths = ensure_dirs(base)
+    pending = pending_wireguard_paths(paths)
+    if not pending["wg"].exists():
+        # A profile sidecar without a staged config is never authoritative.
+        remove_private_file(pending["profile"])
+        return
+    reject_symlink(pending["wg"], kind="pending WireGuard file")
+    if not pending["wg"].is_file() or pending["wg"].stat().st_size > MAX_WG_BYTES:
+        raise ConfigError("WG_SOURCE_INVALID", "Pending WireGuard configuration is invalid.")
+    raw = pending["wg"].read_bytes()
+    try:
+        parsed = parse_wireguard(raw.decode("utf-8"), allow_netwatch_hooks=True)
+    except (UnicodeDecodeError, ConfigError) as exc:
+        raise ConfigError("WG_SOURCE_INVALID", "Pending WireGuard configuration is invalid.") from exc
+    staged_profile = read_vpn_profile(pending["profile"]) or {
+        "profile_type": "generic",
+        "imported_at": None,
+        "source_created_at": None,
+        "source_modified_at": None,
+    }
+    atomic_write(paths["wg_confs"] / "wg0.conf", render_wireguard(parsed), 0o600)
+    atomic_write(paths["config"] / "resolv.conf", render_resolv(list(parsed["dns"])), 0o600)
+    write_vpn_profile(paths["data"] / "vpn-profile.json", staged_profile)
+    # Keep this marker until the promoted tunnel passes the normal live VPN gate.
+    atomic_write(pending["marker"], b"pending\n", 0o600)
+    remove_private_file(pending["wg"])
+    remove_private_file(pending["profile"])
+
+
 def read_pending_api(path: Path) -> list[str]:
     if not path.exists():
         return []
@@ -472,6 +609,9 @@ def inspect_state(base: Path) -> dict[str, object]:
     setup_log = paths["data"] / "setup.log"
     pending_api_path = paths["data"] / ".setup-api-pending"
     pending_prowlarr_path = paths["data"] / ".setup-prowlarr-pending"
+    vpn_profile_path = paths["data"] / "vpn-profile.json"
+    vpn_pending_path = paths["data"] / ".setup-vpn-pending"
+    staged_paths = pending_wireguard_paths(paths)
     ensure_backend_env(backend_env)
     os.chmod(backend_env, 0o600)
 
@@ -519,9 +659,15 @@ def inspect_state(base: Path) -> dict[str, object]:
             raise ConfigError("PRIVATE_PATH_UNSAFE", "NetWatch setup log path is not a regular file.")
         os.chmod(setup_log, 0o600)
 
+    vpn_profile = read_vpn_profile(vpn_profile_path)
+    vpn_profile_state = vpn_profile_view(vpn_profile)
+    staged_vpn_profile = read_vpn_profile(staged_paths["profile"]) if staged_paths["profile"].exists() else None
+    staged_vpn = staged_paths["wg"].exists()
+
     pending_api_names = read_pending_api(pending_api_path)
     pending_api = bool(pending_api_names)
     pending_prowlarr = pending_prowlarr_path.exists()
+    pending_vpn = vpn_pending_path.exists()
     if pending_api:
         os.chmod(pending_api_path, 0o600)
     if pending_prowlarr:
@@ -529,6 +675,11 @@ def inspect_state(base: Path) -> dict[str, object]:
         if not pending_prowlarr_path.is_file() or pending_prowlarr_path.stat().st_size > 64:
             raise ConfigError("PENDING_STATE_INVALID", "NetWatch setup recovery state is invalid.")
         os.chmod(pending_prowlarr_path, 0o600)
+    if pending_vpn:
+        reject_symlink(vpn_pending_path, kind="private setup state file")
+        if not vpn_pending_path.is_file() or vpn_pending_path.stat().st_size > 64:
+            raise ConfigError("PENDING_STATE_INVALID", "NetWatch setup recovery state is invalid.")
+        os.chmod(vpn_pending_path, 0o600)
 
     modes = {
         "config_dir": safe_mode(paths["config"]),
@@ -540,6 +691,10 @@ def inspect_state(base: Path) -> dict[str, object]:
         "setup_log": safe_mode(setup_log) if setup_log.exists() else None,
         "pending_api": safe_mode(pending_api_path) if pending_api else None,
         "pending_prowlarr": safe_mode(pending_prowlarr_path) if pending_prowlarr else None,
+        "vpn_profile": safe_mode(vpn_profile_path) if vpn_profile_path.exists() else None,
+        "pending_vpn": safe_mode(vpn_pending_path) if pending_vpn else None,
+        "staged_wg": safe_mode(staged_paths["wg"]) if staged_paths["wg"].exists() else None,
+        "staged_vpn_profile": safe_mode(staged_paths["profile"]) if staged_paths["profile"].exists() else None,
     }
     dirs_secure = all(modes[key] == "700" for key in ("config_dir", "wireguard_dir", "wg_confs_dir"))
     files_secure = (
@@ -549,6 +704,10 @@ def inspect_state(base: Path) -> dict[str, object]:
         and (not setup_log.exists() or modes["setup_log"] == "600")
         and (not pending_api or modes["pending_api"] == "600")
         and (not pending_prowlarr or modes["pending_prowlarr"] == "600")
+        and (not vpn_profile_path.exists() or modes["vpn_profile"] == "600")
+        and (not pending_vpn or modes["pending_vpn"] == "600")
+        and (not staged_paths["wg"].exists() or modes["staged_wg"] == "600")
+        and (not staged_paths["profile"].exists() or modes["staged_vpn_profile"] == "600")
     )
 
     return {
@@ -564,6 +723,11 @@ def inspect_state(base: Path) -> dict[str, object]:
             "parse_ok": env_parse_ok,
             "configured": configured,
         },
+        "vpn_profile": vpn_profile_state,
+        "vpn_replacement": {
+            "staged": staged_vpn,
+            "profile": vpn_profile_view(staged_vpn_profile) if staged_vpn else None,
+        },
         "permissions": {
             "dirs_secure": dirs_secure,
             "files_secure": files_secure,
@@ -573,10 +737,11 @@ def inspect_state(base: Path) -> dict[str, object]:
             "api": pending_api,
             "api_names": pending_api_names,
             "prowlarr": pending_prowlarr,
+            "vpn": pending_vpn,
         },
         "complete": bool(
             wg_valid and env_parse_ok and all(configured.values()) and dirs_secure and files_secure
-            and not pending_api and not pending_prowlarr
+            and not pending_api and not pending_prowlarr and not pending_vpn
         ),
     }
 
@@ -620,14 +785,29 @@ def main() -> int:
     if not base.is_absolute():
         fail("BASE_INVALID", "NetWatch base directory must be absolute.", 2)
     try:
-        if action in {"bootstrap", "inspect"}:
+        if action == "bootstrap":
+            promote_pending_wireguard(base)
             state = inspect_state(base)
             print(json.dumps(state, separators=(",", ":")))
             return 0
 
-        if action == "import-wireguard":
-            if len(sys.argv) != 3:
-                raise ConfigError("WG_SOURCE_INVALID", "WireGuard import request is invalid.")
+        if action == "inspect":
+            state = inspect_state(base)
+            print(json.dumps(state, separators=(",", ":")))
+            return 0
+
+        if action == "stage-wireguard":
+            if len(sys.argv) != 6:
+                raise ConfigError("WG_SOURCE_INVALID", "WireGuard replacement request is invalid.")
+            profile_type = sys.argv[3]
+            source_created_at = sys.argv[4]
+            source_modified_at = sys.argv[5]
+            profile = normalize_vpn_profile_payload({
+                "profile_type": profile_type,
+                "source_created_at": source_created_at or None,
+                "source_modified_at": source_modified_at or None,
+                "imported_at": datetime.now(timezone.utc).isoformat(),
+            })
             raw = sys.stdin.buffer.read(MAX_WG_BYTES + 1)
             if not raw:
                 raise ConfigError("WG_TOO_LARGE", "The selected WireGuard file is empty.")
@@ -638,9 +818,70 @@ def main() -> int:
             except UnicodeDecodeError as exc:
                 raise ConfigError("WG_ENCODING_INVALID", "The selected WireGuard file is not UTF-8 text.") from exc
             paths = ensure_dirs(base)
+            pending = pending_wireguard_paths(paths)
+            remove_private_file(pending["wg"])
+            remove_private_file(pending["profile"])
+            atomic_write(pending["wg"], render_wireguard(parsed), 0o600)
+            write_vpn_profile(pending["profile"], profile)
+            print(json.dumps({"ok": True, "vpn_profile": vpn_profile_view(profile)}, separators=(",", ":")))
+            return 0
+
+        if action == "import-wireguard":
+            if len(sys.argv) not in {3, 6}:
+                raise ConfigError("WG_SOURCE_INVALID", "WireGuard import request is invalid.")
+            profile_type = sys.argv[3] if len(sys.argv) == 6 else "generic"
+            source_created_at = sys.argv[4] if len(sys.argv) == 6 else ""
+            source_modified_at = sys.argv[5] if len(sys.argv) == 6 else ""
+            profile = normalize_vpn_profile_payload({
+                "profile_type": profile_type,
+                "source_created_at": source_created_at or None,
+                "source_modified_at": source_modified_at or None,
+                "imported_at": datetime.now(timezone.utc).isoformat(),
+            })
+            raw = sys.stdin.buffer.read(MAX_WG_BYTES + 1)
+            if not raw:
+                raise ConfigError("WG_TOO_LARGE", "The selected WireGuard file is empty.")
+            if len(raw) > MAX_WG_BYTES:
+                raise ConfigError("WG_TOO_LARGE", "The selected WireGuard file exceeds 8 KiB.")
+            try:
+                parsed = parse_wireguard(raw.decode("utf-8"), allow_netwatch_hooks=True)
+            except UnicodeDecodeError as exc:
+                raise ConfigError("WG_ENCODING_INVALID", "The selected WireGuard file is not UTF-8 text.") from exc
+            paths = ensure_dirs(base)
+            profile_path = paths["data"] / "vpn-profile.json"
+            # Clear old UX metadata before replacing the config so an interrupted update
+            # can never leave a new tunnel profile carrying a stale provider label/timer.
+            remove_private_file(profile_path)
             atomic_write(paths["wg_confs"] / "wg0.conf", render_wireguard(parsed), 0o600)
             atomic_write(paths["config"] / "resolv.conf", render_resolv(list(parsed["dns"])), 0o600)
-            print(json.dumps({"ok": True, "dns_count": len(parsed["dns"])}, separators=(",", ":")))
+            write_vpn_profile(profile_path, profile)
+            print(json.dumps({"ok": True, "dns_count": len(parsed["dns"]), "vpn_profile": vpn_profile_view(profile)}, separators=(",", ":")))
+            return 0
+
+        if action == "set-vpn-profile-type":
+            payload = read_payload()
+            if set(payload) != {"profile_type"}:
+                raise ConfigError("VPN_PROFILE_INVALID", "VPN profile type request is invalid.")
+            profile_type = payload.get("profile_type")
+            if profile_type not in VPN_PROFILE_TYPES:
+                raise ConfigError("VPN_PROFILE_INVALID", "VPN profile type is invalid.")
+            paths = ensure_dirs(base)
+            profile_path = paths["data"] / "vpn-profile.json"
+            current = read_vpn_profile(profile_path) or {
+                "profile_type": "generic",
+                "imported_at": None,
+                "source_created_at": None,
+                "source_modified_at": None,
+            }
+            current["profile_type"] = profile_type
+            write_vpn_profile(profile_path, current)
+            print(json.dumps({"ok": True, "vpn_profile": vpn_profile_view(current)}, separators=(",", ":")))
+            return 0
+
+        if action == "mark-vpn-validated":
+            paths = ensure_dirs(base)
+            remove_private_file(paths["data"] / ".setup-vpn-pending")
+            print(json.dumps({"ok": True}, separators=(",", ":")))
             return 0
 
         if action == "set-api":

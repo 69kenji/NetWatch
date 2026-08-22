@@ -1,6 +1,6 @@
 'use strict'
 
-const state = { current: null, busy: false }
+const state = { current: null, busy: false, profileType: 'generic' }
 const el = (id) => document.getElementById(id)
 const message = el('message')
 const progress = el('progress')
@@ -14,6 +14,7 @@ function setBusy(busy, text = '') {
   state.busy = busy
   progress.classList.toggle('active', busy)
   document.querySelectorAll('button').forEach(button => { button.disabled = busy })
+  el('vpnProfileType').disabled = busy
   if (text) setMessage(text)
   if (!busy) render(state.current)
 }
@@ -33,6 +34,17 @@ function setMessage(text, kind = '') {
 
 function clearInputs() {
   for (const id of ['tmdb', 'opensubtitles', 'subdl']) el(id).value = ''
+}
+
+function renderVpnProfile(profile = {}) {
+  const profileType = profile.profile_type === 'vpnbook' ? 'vpnbook' : 'generic'
+  state.profileType = profileType
+  el('vpnProfileType').value = profileType
+  const isVpnBook = profileType === 'vpnbook'
+  el('getVpnBook').style.display = isVpnBook ? '' : 'none'
+  el('profileHint').textContent = isVpnBook
+    ? 'VPNBook uses standard WireGuard; NetWatch adds an expiry reminder'
+    : 'Provider selection only controls guidance; routing stays WireGuard'
 }
 
 function showStep(target) {
@@ -73,6 +85,7 @@ function render(next) {
   if (state.busy) return
   const wg = next.wg || {}
   const configured = next.env?.configured || {}
+  renderVpnProfile(next.vpn_profile || {})
   el('wgState').textContent = wg.valid ? 'Ready' : wg.exists ? 'Needs attention' : 'Required'
   el('wgState').className = `state-chip ${wg.valid ? 'good' : wg.exists ? 'bad' : ''}`
   el('wgConfigHint').textContent = wg.valid ? 'Configuration secured' : wg.exists ? 'Import a replacement .conf file' : 'Import your provider .conf file'
@@ -103,7 +116,10 @@ function render(next) {
 
   setStage('done')
   showStep(doneStep)
-  setMessage('Opening Prowlarr setup…', 'success')
+  const prowlarrConfigured = Boolean(configured.prowlarr)
+  el('doneKicker').textContent = prowlarrConfigured ? 'VPN verified' : 'Step 2 complete'
+  el('doneTitle').textContent = prowlarrConfigured ? 'Ready' : 'Ready for Prowlarr'
+  setMessage(prowlarrConfigured ? 'Starting NetWatch…' : 'Opening Prowlarr setup…', 'success')
 }
 
 async function refresh() {
@@ -120,7 +136,7 @@ async function importWireGuard() {
   setBusy(true, 'Importing WireGuard configuration…')
   let notice = { text: '', kind: '' }
   try {
-    const result = await window.netwatchSetup.chooseWireGuard()
+    const result = await window.netwatchSetup.chooseWireGuard(state.profileType)
     state.current = result.state || state.current
     notice = result.cancelled
       ? { text: 'WireGuard import cancelled.', kind: '' }
@@ -129,6 +145,29 @@ async function importWireGuard() {
     notice = { text: error?.message || 'WireGuard configuration was rejected.', kind: 'error' }
   } finally {
     finishBusy(notice.text, notice.kind)
+  }
+}
+
+async function changeVpnProfileType() {
+  if (state.busy) return
+  const nextType = el('vpnProfileType').value === 'vpnbook' ? 'vpnbook' : 'generic'
+  state.profileType = nextType
+  renderVpnProfile({ profile_type: nextType })
+  try {
+    const result = await window.netwatchSetup.setVpnProfileType(nextType)
+    state.current = result.state || state.current
+    render(state.current)
+  } catch (error) {
+    setMessage(error?.message || 'VPN profile setting could not be saved.', 'error')
+  }
+}
+
+async function openVpnBook() {
+  if (state.busy) return
+  try {
+    await window.netwatchSetup.openVpnBook()
+  } catch (error) {
+    setMessage(error?.message || 'VPNBook could not be opened.', 'error')
   }
 }
 
@@ -173,6 +212,8 @@ async function saveApi() {
   }
 }
 
+el('vpnProfileType').addEventListener('change', () => { void changeVpnProfileType() })
+el('getVpnBook').addEventListener('click', () => { void openVpnBook() })
 el('importWg').addEventListener('click', importWireGuard)
 el('replaceWg').addEventListener('click', importWireGuard)
 el('verifyVpn').addEventListener('click', verifyVpn)
