@@ -97,6 +97,8 @@ The packaged setup flow is:
 4. Configure Prowlarr and enter its API key.
 5. Start NetWatch normally.
 
+VPNBook: Use UDP port 443 by default. If performance is poor, try 25018 instead.
+
 NetWatch rewrites the imported WireGuard configuration into its own canonical form. Provider command hooks are rejected, a full IPv4 tunnel (`0.0.0.0/0`) is required, and the VPN configuration must provide a usable IPv4 DNS resolver.
 
 VPNBook uses the same WireGuard path; fresh profiles are available from [VPNBook WireGuard](https://www.vpnbook.com/freevpn/wireguard-vpn). Selecting **VPNBook** only enables provider-specific guidance and an estimated seven-day profile-expiry reminder based on local file/import timestamps. It does not change routing or VPN verification.
