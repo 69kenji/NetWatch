@@ -65,6 +65,7 @@ The image is pulled by Docker and is not embedded in the NetWatch source ZIP.
 
 The image is pulled by Docker and is not embedded in the NetWatch source ZIP.
 
+
 ## Electron and application dependencies
 
 The packaged application includes Electron/Chromium/Node and JavaScript dependencies whose licenses remain their own. Electron distributions include their Chromium/open-source notices. Binary distributors must preserve notices/licenses required by all bundled dependencies.
@@ -72,3 +73,10 @@ The packaged application includes Electron/Chromium/Node and JavaScript dependen
 ## Trademarks
 
 Third-party names and trademarks are used only for identification. NetWatch's license does not grant rights to third-party trademarks.
+
+## Go runtime — bundled video surface helper
+
+- Toolchain used for the helper: Go 1.23.2
+- License: BSD-style Go license
+
+NetWatch's project-owned `netwatch-surface-helper.exe` is built from source under `native/surface-helper/` and statically includes portions of the Go runtime/standard library. It only manages the embedded mpv child window and does not launch processes. The upstream Go license text is distributed as `resources/native/GO-LICENSE.txt`.

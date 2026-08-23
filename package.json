@@ -1,6 +1,6 @@
 {
   "name": "netwatch",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Self-hosted Windows media client with a Docker/VPN-isolated runtime",
   "license": "GPL-3.0-only",
   "main": "electron/main.js",
@@ -52,6 +52,16 @@
           "README.md",
           "Copyright.txt",
           "LICENSE.GPL-2.0",
+          "BUILD-PROVENANCE.md"
+        ]
+      },
+      {
+        "from": "resources/native",
+        "to": "native",
+        "filter": [
+          "netwatch-surface-helper.exe",
+          "README.md",
+          "GO-LICENSE.txt",
           "BUILD-PROVENANCE.md"
         ]
       },

@@ -28,7 +28,7 @@ Its Internet-facing services share one Docker network namespace behind an inner 
 ## Architecture
 
 ```text
-Windows Electron / mpv
+Windows Electron / native mpv
         |
         | localhost / IPC
         v
@@ -67,7 +67,7 @@ For the full network/privacy model, see [`docs/network-threat-model.md`](docs/ne
 - Home, Discover, and unified TMDB search for movies, TV, and anime.
 - Torrent discovery through user-configured Prowlarr indexers, with bundled FlareSolverr available as an indexer proxy.
 - Direct libtorrent streaming with seek-aware HTTP Range scheduling.
-- Native Windows mpv playback with fullscreen, seeking, audio tracks, subtitles, buffering/recovery, and live network telemetry.
+- Native Windows mpv playback with fullscreen, seeking, audio tracks, subtitles, buffering/recovery, and live network telemetry. Normal playback launches bundled mpv directly from Electron without PowerShell or an intermediate launcher helper.
 - OpenSubtitles and SubDL subtitle integration.
 - Inner WireGuard routing, VPN-side DNS, loopback-only host exposure, startup network verification, and optional VPNBook expiry reminders.
 
@@ -129,6 +129,10 @@ Packaged state lives under:
 ```
 
 `config/` and `data/` are preserved across normal reinstall/upgrade and are not removed by a normal NetWatch uninstall. Torrent playback data is ephemeral.
+
+## Player process model
+
+NetWatch 1.0.3 launches the bundled `mpv.exe` process directly from Electron with Node's shell-free `child_process.spawn` path. Normal playback does not invoke PowerShell, WMI scripting, `Add-Type`, `csc.exe`, or a project-owned launcher helper. The pkg34 candidate intentionally lets mpv manage its own `--wid` child-window embedding so the previous helper-based process/window workaround can be tested independently against third-party endpoint protection.
 
 ## Build from source
 

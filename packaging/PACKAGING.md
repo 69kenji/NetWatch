@@ -26,11 +26,15 @@ Then build the installer:
 npm run package:win
 ```
 
-For 1.0.2 the installer is:
+For 1.0.3 the installer is:
 
 ```text
-release\NetWatch-Setup-1.0.2.exe
+release\NetWatch-Setup-1.0.3.exe
 ```
+
+## Player process model
+
+NetWatch 1.0.3 pkg34 launches bundled `mpv.exe` directly from Electron with `child_process.spawn` using `shell: false` and `detached: true`. It ships no NetWatch-specific player helper and invokes no PowerShell/C# compiler during ordinary playback. The existing player surface-sync API remains present but performs no external Win32 helper work in this experimental candidate.
 
 ## Installer behavior
 
@@ -73,23 +77,15 @@ VPNBook provider metadata and expiry estimates contain no WireGuard key material
 
 Normal uninstall removes the Windows application but intentionally preserves `config/` and `data/`. It also does not uninstall Docker Desktop, disable WSL, or unregister the user's Linux distribution.
 
-For an existing development install, the optional migration helper is:
-
-```bash
-./packaging/migrate-existing-config.sh /absolute/path/to/existing/netwatch
-```
-
-It copies only from the path supplied by the user and does not search for credentials.
-
 ## Release checks
 
 Before publishing an installer:
 
 1. Build from a clean NTFS checkout with `npm ci`.
 2. Test the unpacked application.
-3. Build and test `NetWatch-Setup-1.0.2.exe` through install/reinstall/uninstall/reinstall.
+3. Build and test `NetWatch-Setup-1.0.3.exe` through install/reinstall/uninstall/reinstall.
 4. Confirm expected WSL private state survives normal uninstall/reinstall.
-5. Confirm installed resources contain the license/notices and mpv provenance files.
+5. Confirm installed resources contain the license/notices and mpv provenance files; no `native/netwatch-player-helper.exe` should be present.
 6. Hash the source ZIP and installer.
 7. Publish the GPL corresponding source/build materials required for the bundled GPL-enabled mpv runtime.
 

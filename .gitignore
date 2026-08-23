@@ -67,5 +67,5 @@ step14-captures/
 /docker/prowlarr/config/*
 !/docker/prowlarr/config/.gitkeep
 
-# Packaged/native player binaries are intentionally versioned because they are
+# Packaged mpv binaries are intentionally versioned because they are
 # required for a complete Windows build. Do not add resources/mpv/ here.

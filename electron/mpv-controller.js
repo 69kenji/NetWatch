@@ -65,12 +65,12 @@ function nativeWindowHandleToDecimal(win) {
 function resolveMpvExecutable() {
   const configured = process.env.NETWATCH_MPV_PATH
   if (configured) {
-    // The Windows console entry point is the launch path we have verified with
-    // Node/Electron child_process. If an old dev override still points at
-    // mpv.exe, transparently prefer the sibling mpv.com when it is present.
-    if (process.platform === 'win32' && path.basename(configured).toLowerCase() === 'mpv.exe') {
-      const consoleEntry = path.join(path.dirname(configured), 'mpv.com')
-      if (fs.existsSync(consoleEntry)) return consoleEntry
+    // pkg34 launches the actual GUI-subsystem mpv executable directly from
+    // Electron. Prefer mpv.exe over the small console wrapper so there is no
+    // intermediate console process and no need to hide a child console.
+    if (process.platform === 'win32' && path.basename(configured).toLowerCase() === 'mpv.com') {
+      const guiEntry = path.join(path.dirname(configured), 'mpv.exe')
+      if (fs.existsSync(guiEntry)) return guiEntry
     }
     return configured
   }
@@ -78,11 +78,11 @@ function resolveMpvExecutable() {
   const candidates = []
   if (process.platform === 'win32') {
     if (process.resourcesPath) {
-      candidates.push(path.join(process.resourcesPath, 'mpv', 'mpv.com'))
       candidates.push(path.join(process.resourcesPath, 'mpv', 'mpv.exe'))
+      candidates.push(path.join(process.resourcesPath, 'mpv', 'mpv.com'))
     }
-    candidates.push(path.join(__dirname, '..', 'resources', 'mpv', 'mpv.com'))
     candidates.push(path.join(__dirname, '..', 'resources', 'mpv', 'mpv.exe'))
+    candidates.push(path.join(__dirname, '..', 'resources', 'mpv', 'mpv.com'))
   } else {
     if (process.resourcesPath) candidates.push(path.join(process.resourcesPath, 'mpv', 'mpv'))
     candidates.push(path.join(__dirname, '..', 'resources', 'mpv', 'mpv'))
@@ -92,320 +92,95 @@ function resolveMpvExecutable() {
   if (bundled) return bundled
 
   // Development fallback. Production packaging should bundle mpv under resources/mpv.
-  return process.platform === 'win32' ? 'mpv.com' : 'mpv'
+  return process.platform === 'win32' ? 'mpv.exe' : 'mpv'
 }
 
+function resolveSurfaceHelperExecutable() {
+  const configured = process.env.NETWATCH_SURFACE_HELPER_PATH
+  if (configured) return configured
 
-function quoteWindowsArg(value) {
-  const text = String(value)
-  if (!text) return '""'
-  if (!/[\s"]/u.test(text)) return text
-
-  let result = '"'
-  let backslashes = 0
-
-  for (const char of text) {
-    if (char === '\\') {
-      backslashes += 1
-      continue
+  const candidates = []
+  if (process.platform === 'win32') {
+    if (process.resourcesPath) {
+      candidates.push(path.join(process.resourcesPath, 'native', 'netwatch-surface-helper.exe'))
     }
-
-    if (char === '"') {
-      result += '\\'.repeat(backslashes * 2 + 1)
-      result += '"'
-      backslashes = 0
-      continue
-    }
-
-    result += '\\'.repeat(backslashes)
-    backslashes = 0
-    result += char
+    candidates.push(path.join(__dirname, '..', 'resources', 'native', 'netwatch-surface-helper.exe'))
   }
 
-  result += '\\'.repeat(backslashes * 2)
-  result += '"'
-  return result
-}
+  const bundled = candidates.find(candidate => fs.existsSync(candidate))
+  if (bundled) return bundled
 
-const WINDOWS_WMI_LAUNCHER = `
-$ErrorActionPreference = 'Stop'
-
-$commandLine = $env:NETWATCH_MPV_COMMAND_LINE
-$currentDirectory = $env:NETWATCH_MPV_CWD
-
-if ([string]::IsNullOrWhiteSpace($commandLine)) {
-  throw 'NETWATCH_MPV_COMMAND_LINE is missing'
-}
-
-# mpv.com is a console-subsystem binary. Without explicit startup information,
-# Win32_Process.Create allocates a visible console window even though the small
-# PowerShell launcher itself is hidden. Hide only that console; NetWatch's
-# embedded --wid video child is shown/resized separately after mpv starts.
-$startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{
-  ShowWindow = [uint16]0
-}
-
-$result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-  CommandLine = $commandLine
-  CurrentDirectory = $currentDirectory
-  ProcessStartupInformation = $startup
-}
-
-[pscustomobject]@{
-  ReturnValue = [int]$result.ReturnValue
-  ProcessId = [int]$result.ProcessId
-} | ConvertTo-Json -Compress
-
-if ([int]$result.ReturnValue -ne 0) {
-  exit 1
-}
-`.trim()
-
-function encodePowerShellCommand(script) {
-  return Buffer.from(script, 'utf16le').toString('base64')
+  throw new Error('NetWatch video surface helper is missing from the application resources')
 }
 
 async function spawnMpvOnWindows(executable, args) {
-  // Electron/Chromium can run inside a Windows Job object. Normal CreateProcess
-  // children inherit that job even when Node's `detached` option is used.
-  // Win32_Process.Create is deliberately used here because Windows documents
-  // that processes created through it are not associated with the caller's job.
-  // This keeps mpv on the normal interactive desktop while Electron retains
-  // control through mpv's named-pipe JSON IPC.
+  // Experimental 1.0.3 direct-launch path. Start mpv as a detached Electron
+  // child with no PowerShell, WMI, native launcher, or shell intermediary.
+  // This candidate intentionally tests current Electron/Windows/mpv behavior
+  // without the historical special process-launch workaround.
   const localCwd = process.env.SystemRoot || process.env.USERPROFILE || 'C:\\Windows'
-  const commandLine = [executable, ...args].map(quoteWindowsArg).join(' ')
-  const encoded = encodePowerShellCommand(WINDOWS_WMI_LAUNCHER)
-
-  const env = {
-    ...process.env,
-    NETWATCH_MPV_COMMAND_LINE: commandLine,
-    NETWATCH_MPV_CWD: localCwd,
-  }
 
   return new Promise((resolve, reject) => {
-    const launcher = spawn('powershell.exe', [
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-EncodedCommand',
-      encoded,
-    ], {
-      shell: false,
-      windowsHide: true,
-      cwd: localCwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env,
-    })
+    let child
+    try {
+      child = spawn(executable, args, {
+        shell: false,
+        cwd: localCwd,
+        detached: true,
+        stdio: 'ignore',
+      })
+    } catch (error) {
+      reject(error)
+      return
+    }
 
-    let stdout = ''
-    let stderr = ''
-    launcher.stdout.on('data', chunk => { stdout += chunk.toString() })
-    launcher.stderr.on('data', chunk => { stderr += chunk.toString() })
-
-    launcher.once('error', reject)
-    launcher.once('exit', code => {
-      if (code !== 0) {
-        reject(new Error(`Win32_Process.Create launcher failed (${code}): ${stderr.trim() || stdout.trim() || 'unknown error'}`))
+    let settled = false
+    const cleanup = () => {
+      child.removeListener('error', onError)
+      child.removeListener('spawn', onSpawn)
+    }
+    const onError = error => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(error)
+    }
+    const onSpawn = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      const pid = Number(child.pid)
+      if (!Number.isInteger(pid) || pid <= 0) {
+        reject(new Error(`Electron returned invalid mpv PID ${child.pid ?? 'none'}`))
         return
       }
+      resolve({ pid, child, launchMode: 'electron_detached' })
+    }
 
-      try {
-        const lines = stdout.trim().split(/\r?\n/u).filter(Boolean)
-        const result = JSON.parse(lines.at(-1) || '{}')
-        const returnValue = Number(result.ReturnValue)
-        const pid = Number(result.ProcessId)
-
-        if (returnValue !== 0 || !Number.isInteger(pid) || pid <= 0) {
-          throw new Error(`Win32_Process.Create returned ${returnValue} with PID ${result.ProcessId ?? 'none'}`)
-        }
-
-        resolve({ pid, commandLine })
-      } catch (error) {
-        reject(new Error(`Could not parse Win32_Process.Create result: ${error.message}; stdout=${stdout.trim()}`))
-      }
-    })
+    child.once('error', onError)
+    child.once('spawn', onSpawn)
   })
 }
-
-
-const WINDOWS_SURFACE_SYNCER = `
-$ErrorActionPreference = 'Stop'
-
-$parentValue = [Int64]$env:NETWATCH_MPV_PARENT_HWND
-$targetPid = [UInt32]$env:NETWATCH_MPV_PID
-$timeoutMs = [Int32]$env:NETWATCH_MPV_SURFACE_TIMEOUT_MS
-
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-
-public static class NetWatchMpvSurface
-{
-    public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct RECT
-    {
-        public int Left;
-        public int Top;
-        public int Right;
-        public int Bottom;
-    }
-
-    private static uint _targetPid;
-    private static IntPtr _found;
-    private static int _lastWidth = -1;
-    private static int _lastHeight = -1;
-
-    [DllImport("user32.dll")]
-    private static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-
-    [DllImport("user32.dll")]
-    private static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
-
-    [DllImport("user32.dll")]
-    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-    [DllImport("user32.dll")]
-    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-
-    [DllImport("user32.dll")]
-    private static extern bool IsWindow(IntPtr hWnd);
-
-    private static bool FindTarget(IntPtr hwnd, IntPtr lParam)
-    {
-        uint pid;
-        GetWindowThreadProcessId(hwnd, out pid);
-        if (pid == _targetPid)
-        {
-            _found = hwnd;
-            return false;
-        }
-        return true;
-    }
-
-    public static long FindChild(long parentValue, uint targetPid)
-    {
-        IntPtr parent = new IntPtr(parentValue);
-        _targetPid = targetPid;
-        _found = IntPtr.Zero;
-        EnumChildWindows(parent, FindTarget, IntPtr.Zero);
-        return _found.ToInt64();
-    }
-
-    public static bool IsAlive(long hwndValue)
-    {
-        return hwndValue != 0 && IsWindow(new IntPtr(hwndValue));
-    }
-
-    public static int Fit(long parentValue, long childValue)
-    {
-        IntPtr parent = new IntPtr(parentValue);
-        IntPtr child = new IntPtr(childValue);
-        if (!IsWindow(parent) || !IsWindow(child))
-            return 0;
-
-        RECT client;
-        if (!GetClientRect(parent, out client))
-            return -1;
-
-        int width = Math.Max(1, client.Right - client.Left);
-        int height = Math.Max(1, client.Bottom - client.Top);
-        if (width == _lastWidth && height == _lastHeight)
-            return 1;
-
-        ShowWindow(child, 5); // SW_SHOW
-        bool ok = SetWindowPos(
-            child,
-            IntPtr.Zero, // HWND_TOP
-            0,
-            0,
-            width,
-            height,
-            0x0050 // SWP_NOACTIVATE | SWP_SHOWWINDOW
-        );
-        if (ok)
-        {
-            _lastWidth = width;
-            _lastHeight = height;
-        }
-        return ok ? 1 : -1;
-    }
-}
-"@
-
-$deadline = [DateTime]::UtcNow.AddMilliseconds([Math]::Max(100, $timeoutMs))
-$childValue = 0
-
-do {
-    $childValue = [NetWatchMpvSurface]::FindChild($parentValue, $targetPid)
-    if ($childValue -gt 0) { break }
-    Start-Sleep -Milliseconds 25
-} while ([DateTime]::UtcNow -lt $deadline)
-
-if ($childValue -le 0) {
-    throw "Timed out waiting for mpv child HWND under parent $parentValue for PID $targetPid"
-}
-
-if ([NetWatchMpvSurface]::Fit($parentValue, $childValue) -lt 1) {
-    throw 'SetWindowPos/GetClientRect failed while synchronizing the mpv video surface'
-}
-
-[pscustomobject]@{
-    ChildHwnd = [Int64]$childValue
-    ParentHwnd = $parentValue
-    ProcessId = $targetPid
-} | ConvertTo-Json -Compress
-[Console]::Out.Flush()
-
-# Keep one tiny native watcher alive for the lifetime of the player. The old
-# implementation launched a complete PowerShell/Add-Type process on every resize
-# event; that was the source of the visible resize lag. This loop only calls the
-# already-compiled Win32 SetWindowPos when the parent size changes.
-while (
-    [NetWatchMpvSurface]::IsAlive($parentValue) -and
-    [NetWatchMpvSurface]::IsAlive($childValue)
-) {
-    $fit = [NetWatchMpvSurface]::Fit($parentValue, $childValue)
-    if ($fit -lt 0) { exit 2 }
-    if ($fit -eq 0) { break }
-    Start-Sleep -Milliseconds 16
-}
-`.trim()
 
 function startMpvSurfaceWatcherOnWindows(parentHwnd, mpvPid, timeoutMs = 1500) {
   if (process.platform !== 'win32') return Promise.resolve(null)
   if (!parentHwnd || !mpvPid) return Promise.resolve(null)
 
   const localCwd = process.env.SystemRoot || process.env.USERPROFILE || 'C:\\Windows'
-  const encoded = encodePowerShellCommand(WINDOWS_SURFACE_SYNCER)
-  const env = {
-    ...process.env,
-    NETWATCH_MPV_PARENT_HWND: String(parentHwnd),
-    NETWATCH_MPV_PID: String(mpvPid),
-    NETWATCH_MPV_SURFACE_TIMEOUT_MS: String(Math.max(100, Number(timeoutMs) || 1500)),
-  }
+  const helperExecutable = resolveSurfaceHelperExecutable()
 
   return new Promise((resolve, reject) => {
-    const helper = spawn('powershell.exe', [
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-EncodedCommand',
-      encoded,
+    // This helper only manages an existing HWND. It does not launch mpv or any
+    // other process, and the GUI-subsystem binary needs no hidden-console flag.
+    const helper = spawn(helperExecutable, [
+      'watch',
+      '--parent', String(parentHwnd),
+      '--pid', String(mpvPid),
+      '--timeout-ms', String(Math.max(100, Number(timeoutMs) || 1500)),
     ], {
       shell: false,
-      windowsHide: true,
       cwd: localCwd,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env,
     })
 
     let stdout = ''
@@ -433,7 +208,7 @@ function startMpvSurfaceWatcherOnWindows(parentHwnd, mpvPid, timeoutMs = 1500) {
             resolve({ helper, result })
           }
         } catch (_) {
-          // PowerShell can emit harmless host text before the first JSON line.
+          // Ignore non-JSON output until the helper reports its ready record.
         }
       }
     })
@@ -443,7 +218,7 @@ function startMpvSurfaceWatcherOnWindows(parentHwnd, mpvPid, timeoutMs = 1500) {
     helper.once('exit', code => {
       if (!settled) {
         failBeforeReady(new Error(
-          `mpv surface watcher failed (${code}): ${stderr.trim() || stdout.trim() || 'unknown error'}`
+          `mpv surface helper failed (${code}): ${stderr.trim() || stdout.trim() || 'unknown error'}`
         ))
       }
     })
@@ -567,10 +342,9 @@ class MpvController extends EventEmitter {
       '--no-config',
       '--idle=yes',
       '--keep-open=always',
-      // Create the Win32 --wid child immediately instead of waiting for the
-      // stream to produce a decoded video frame. The surface watcher attaches
-      // to this HWND during startup, so delaying its creation can incorrectly
-      // turn a healthy but still-buffering source into a fatal timeout.
+      // Create the embedded --wid surface immediately instead of waiting for
+      // the stream to produce a decoded video frame. In this direct-launch
+      // experiment mpv owns the embedded child-window lifecycle itself.
       '--force-window=immediate',
       '--volume-max=150',
       '--vo=gpu-next',
@@ -605,8 +379,13 @@ class MpvController extends EventEmitter {
     try {
       const launched = await spawnMpvOnWindows(executable, args)
       this.mpvPid = launched.pid
-      this.process = { pid: launched.pid, killed: false }
-      this._log('info', `Win32_Process.Create started mpv PID ${launched.pid}`)
+      this.process = launched.child
+      this._log('info', `Electron directly started mpv PID ${launched.pid} (${launched.launchMode})`)
+      launched.child.once('error', error => {
+        if (!this.stopping && this.mpvPid === launched.pid) {
+          this._log('warn', `Direct mpv child-process error: ${error.message}`)
+        }
+      })
     } catch (error) {
       this._setState({ status: 'error', error: error.message })
       throw error
@@ -623,9 +402,9 @@ class MpvController extends EventEmitter {
 
     await this._observeProperties()
 
-    // mpv creates a Win32 child HWND for --wid, but on this Electron/Windows
-    // combination that child can remain hidden/behind the host until it is
-    // explicitly shown, raised, and fitted to the parent client area.
+    // Keep the existing surface-sync call site so fullscreen/restore behavior
+    // can be compared directly with 1.0.2. In the pkg34 experiment this method
+    // deliberately performs no Win32 manipulation; mpv owns --wid embedding.
     await this.syncVideoSurface(videoWindow, 5000)
 
     this.ready = true
@@ -656,8 +435,9 @@ class MpvController extends EventEmitter {
 
     if (!parentHwnd) return null
 
-    // Once the watcher is alive it tracks parent client-size changes at ~60 Hz.
-    // Resize events can call this method freely without spawning more helpers.
+    // pkg35 keeps the successful direct Electron -> mpv launch from pkg34 and
+    // restores only the Win32 surface fitting required to make mpv's --wid
+    // child visible. The helper cannot launch processes or invoke a shell.
     if (
       this.surfaceHelper &&
       this.surfaceHelper.exitCode === null &&
@@ -689,7 +469,7 @@ class MpvController extends EventEmitter {
         if (this.surfaceHelper === watched.helper) {
           this.surfaceHelper = null
           if (!this.stopping && this.mpvPid) {
-            this._log('warn', `mpv surface watcher exited (${code ?? 'null'}); it will restart on the next surface sync`)
+            this._log('warn', `mpv surface helper exited (${code ?? 'null'}); it will restart on the next surface sync`)
           }
         }
       })
@@ -700,10 +480,8 @@ class MpvController extends EventEmitter {
   async restartVideoSurface(videoWindow = null, timeoutMs = 2000) {
     if (process.platform !== 'win32') return null
 
-    // A Windows minimize/restore can hide the embedded mpv child without
-    // changing the parent client size. The persistent surface watcher normally
-    // skips unchanged sizes, so restart it to force one fresh ShowWindow +
-    // SetWindowPos pass before resuming its cheap resize watch.
+    // A minimize/restore can hide the embedded child without changing the
+    // parent client size. Restarting forces a fresh ShowWindow/SetWindowPos.
     if (this.surfaceHelper && this.surfaceHelper.exitCode === null) {
       try { this.surfaceHelper.kill() } catch (_) {}
     }
@@ -1050,8 +828,8 @@ class MpvController extends EventEmitter {
       await new Promise(resolve => setTimeout(resolve, 500))
     }
 
-    // Win32_Process.Create intentionally launches mpv outside Electron's Job
-    // object, so Electron must explicitly own cleanup by PID.
+    // The direct-launch experiment uses a detached child. Keep explicit PID
+    // cleanup so mpv cannot survive a NetWatch player shutdown.
     if (process.platform === 'win32' && mpvPid) {
       try {
         const killer = spawn('taskkill.exe', ['/PID', String(mpvPid), '/T', '/F'], {
@@ -1079,7 +857,9 @@ module.exports = {
   MpvController,
   nativeWindowHandleToDecimal,
   resolveMpvExecutable,
+  resolveSurfaceHelperExecutable,
   spawnMpvOnWindows,
+  startMpvSurfaceWatcherOnWindows,
   is2xx,
   startupPlaybackReady,
 }
