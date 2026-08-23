@@ -45,8 +45,7 @@ Var /GLOBAL NetWatchStartMenuCheckbox
 Var /GLOBAL NetWatchDesktopState
 Var /GLOBAL NetWatchStartMenuState
 
-Var /GLOBAL NetWatchPowerShell
-Var /GLOBAL NetWatchPrereqScript
+Var /GLOBAL NetWatchPrereqHelper
 Var /GLOBAL NetWatchPrereqState
 Var /GLOBAL NetWatchElevatedPrereqState
 Var /GLOBAL NetWatchPrereqAction
@@ -64,6 +63,7 @@ Var /GLOBAL NetWatchWslCommandReady
 Var /GLOBAL NetWatchWslPlatformReady
 Var /GLOBAL NetWatchWslRuntimeUsable
 Var /GLOBAL NetWatchDistroInstalled
+Var /GLOBAL NetWatchDistroProvisioned
 Var /GLOBAL NetWatchDistroReady
 Var /GLOBAL NetWatchDistroName
 Var /GLOBAL NetWatchDockerInstalled
@@ -97,6 +97,11 @@ Var /GLOBAL NetWatchBusy
 Var /GLOBAL NetWatchAsyncElevated
 Var /GLOBAL NetWatchAsyncTicks
 Var /GLOBAL NetWatchAsyncMessage
+Var /GLOBAL NetWatchRunComplete
+Var /GLOBAL NetWatchRunHeartbeat
+Var /GLOBAL NetWatchRunLastHeartbeat
+Var /GLOBAL NetWatchRunStaleTicks
+Var /GLOBAL NetWatchRunPhase
 
 Function NetWatchDetectWindowsAndShortcutState
   SetShellVarContext current
@@ -150,11 +155,13 @@ FunctionEnd
 Function NetWatchExtractPrerequisiteHelper
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
-  File /oname=netwatch-prerequisites.ps1 "${BUILD_RESOURCES_DIR}\prerequisites.ps1"
-  StrCpy $NetWatchPrereqScript "$PLUGINSDIR\netwatch-prerequisites.ps1"
+  ; 1.0.4 uses a project-owned fixed-purpose native helper. No PowerShell,
+  ; cmd.exe, WMI scripting, or arbitrary shell command is used by the
+  ; prerequisite bootstrap path.
+  File /oname=netwatch-prerequisites.exe "${BUILD_RESOURCES_DIR}\netwatch-prerequisites.exe"
+  StrCpy $NetWatchPrereqHelper "$PLUGINSDIR\netwatch-prerequisites.exe"
   StrCpy $NetWatchPrereqState "$PLUGINSDIR\netwatch-prerequisites.ini"
   StrCpy $NetWatchElevatedPrereqState "$PLUGINSDIR\netwatch-prerequisites-elevated.ini"
-  StrCpy $NetWatchPowerShell "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
 FunctionEnd
 
 Function NetWatchReadPrerequisiteState
@@ -172,6 +179,7 @@ Function NetWatchReadPrerequisiteState
   StrCpy $NetWatchWslPlatformReady "0"
   StrCpy $NetWatchWslRuntimeUsable "0"
   StrCpy $NetWatchDistroInstalled "0"
+  StrCpy $NetWatchDistroProvisioned "0"
   StrCpy $NetWatchDistroReady "0"
   StrCpy $NetWatchDistroName ""
   StrCpy $NetWatchDockerInstalled "0"
@@ -203,6 +211,7 @@ Function NetWatchReadPrerequisiteState
   ReadINIStr $NetWatchWslPlatformReady "$NetWatchPrereqState" "Status" "WslPlatformReady"
   ReadINIStr $NetWatchWslRuntimeUsable "$NetWatchPrereqState" "Status" "WslRuntimeUsable"
   ReadINIStr $NetWatchDistroInstalled "$NetWatchPrereqState" "Status" "DistroInstalled"
+  ReadINIStr $NetWatchDistroProvisioned "$NetWatchPrereqState" "Status" "DistroProvisioned"
   ReadINIStr $NetWatchDistroReady "$NetWatchPrereqState" "Status" "DistroReady"
   ReadINIStr $NetWatchDistroName "$NetWatchPrereqState" "Status" "DistroName"
   ReadINIStr $NetWatchDockerInstalled "$NetWatchPrereqState" "Status" "DockerInstalled"
@@ -245,7 +254,7 @@ Function NetWatchInvokePrerequisiteHelper
   ; page is visible. Interactive page actions use the timer-driven async path
   ; below so Windows never labels NetWatch Setup "Not Responding".
   Delete "$NetWatchPrereqState"
-  nsExec::ExecToStack '"$NetWatchPowerShell" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$NetWatchPrereqScript" -Action $NetWatchPrereqAction -StatePath "$NetWatchPrereqState"'
+  nsExec::ExecToStack '"$NetWatchPrereqHelper" --action $NetWatchPrereqAction --state "$NetWatchPrereqState"'
   Pop $0
   Pop $1
   Call NetWatchReadPrerequisiteState
@@ -254,6 +263,11 @@ FunctionEnd
 Function NetWatchBeginBusy
   StrCpy $NetWatchBusy "1"
   StrCpy $NetWatchAsyncTicks "0"
+  StrCpy $NetWatchRunComplete "0"
+  StrCpy $NetWatchRunHeartbeat ""
+  StrCpy $NetWatchRunLastHeartbeat ""
+  StrCpy $NetWatchRunStaleTicks "0"
+  StrCpy $NetWatchRunPhase "Starting"
 
   ${If} $NetWatchStatusLabel != ""
     ${NSD_SetText} $NetWatchStatusLabel "$NetWatchAsyncMessage"
@@ -304,7 +318,7 @@ Function NetWatchStartAsyncPrerequisite
   StrCpy $NetWatchAsyncElevated "0"
   Call NetWatchBeginBusy
   ClearErrors
-  ExecShell "open" "$NetWatchPowerShell" '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$NetWatchPrereqScript" -Action $NetWatchPrereqAction -StatePath "$NetWatchPrereqState"' SW_HIDE
+  ExecShell "open" "$NetWatchPrereqHelper" '--action $NetWatchPrereqAction --state "$NetWatchPrereqState"' SW_HIDE
   IfErrors async_start_failed
   ${NSD_CreateTimer} NetWatchPollAsyncPrerequisite 500
   Return
@@ -319,8 +333,8 @@ Function NetWatchStartAsyncElevatedWslHelper
   ClearErrors
 
   ; Request elevation directly from Windows ShellExecute. Setup itself remains
-  ; current-user/asInvoker; only this fixed-purpose WSL helper crosses UAC.
-  ExecShell "runas" "$NetWatchPowerShell" '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$NetWatchPrereqScript" -Action InstallOrUpdateWslElevated -StatePath "$NetWatchElevatedPrereqState"' SW_HIDE
+  ; current-user/asInvoker; only this fixed-purpose native WSL helper crosses UAC.
+  ExecShell "runas" "$NetWatchPrereqHelper" '--action InstallOrUpdateWslElevated --state "$NetWatchElevatedPrereqState"' SW_HIDE
   IfErrors elevation_cancelled
   ${NSD_CreateTimer} NetWatchPollAsyncPrerequisite 500
   Return
@@ -335,24 +349,75 @@ FunctionEnd
 
 Function NetWatchPollAsyncPrerequisite
   IntOp $NetWatchAsyncTicks $NetWatchAsyncTicks + 1
+
   ${If} $NetWatchAsyncElevated == "1"
-    IfFileExists "$NetWatchElevatedPrereqState" async_state_ready
+    StrCpy $0 "$NetWatchElevatedPrereqState"
   ${Else}
-    IfFileExists "$NetWatchPrereqState" async_state_ready
+    StrCpy $0 "$NetWatchPrereqState"
   ${EndIf}
 
-  ; One hour is intentionally generous for a slow Docker download/install. The
-  ; helper itself has tighter operation-specific limits; this is only a UI guard.
+  IfFileExists "$0" 0 async_no_state_yet
+
+  ReadINIStr $NetWatchRunComplete "$0" "Run" "Complete"
+  ReadINIStr $NetWatchRunHeartbeat "$0" "Run" "Heartbeat"
+  ReadINIStr $NetWatchRunPhase "$0" "Run" "Phase"
+
+  ${If} $NetWatchRunComplete == "1"
+    Goto async_state_ready
+  ${EndIf}
+
+  ; The native helper rewrites Heartbeat every two seconds from an independent
+  ; goroutine. If endpoint security or another process terminates the helper, the
+  ; state file remains but this value stops advancing. Detect that explicitly
+  ; instead of waiting an hour or treating a half-finished prerequisite as ready.
+  ${If} $NetWatchRunHeartbeat != ""
+    ${If} $NetWatchRunHeartbeat != $NetWatchRunLastHeartbeat
+      StrCpy $NetWatchRunLastHeartbeat "$NetWatchRunHeartbeat"
+      StrCpy $NetWatchRunStaleTicks "0"
+    ${Else}
+      IntOp $NetWatchRunStaleTicks $NetWatchRunStaleTicks + 1
+    ${EndIf}
+  ${EndIf}
+
+  ${If} $NetWatchRunPhase != ""
+  ${AndIf} $NetWatchStatusLabel != ""
+    ${NSD_SetText} $NetWatchStatusLabel "$NetWatchAsyncMessage$\r$\nPhase: $NetWatchRunPhase"
+  ${EndIf}
+
+  ; 60 polls x 500 ms = 30 seconds without a heartbeat. Long WSL/Docker work is
+  ; safe because the heartbeat is independent of the child process being waited on.
+  ${If} $NetWatchRunStaleTicks >= 60
+    Goto async_helper_interrupted
+  ${EndIf}
+
+async_no_state_yet:
+  ; Allow up to one minute for process startup/UAC before declaring that the
+  ; helper never started. Once a state file exists the heartbeat rule above is
+  ; the authoritative liveness check.
+  ${If} $NetWatchAsyncTicks == 120
+    IfFileExists "$0" +2 0
+    Goto async_helper_interrupted
+  ${EndIf}
+
+  ; One hour remains only an absolute UI ceiling for an unusually slow Docker
+  ; install. The helper has operation-specific limits and a live heartbeat.
   ${If} $NetWatchAsyncTicks >= 7200
     ${NSD_KillTimer} NetWatchPollAsyncPrerequisite
-    Delete "$NetWatchElevatedPrereqState"
-    Delete "$NetWatchPrereqState"
     Call NetWatchEndBusy
     StrCpy $NetWatchActionSuccess "0"
-    StrCpy $NetWatchActionMessage "The prerequisite operation did not report completion within one hour. Close any prerequisite installer still open, then retry."
+    StrCpy $NetWatchActionMessage "The prerequisite operation exceeded one hour. Do not force-close any Windows, WSL, Ubuntu, or Docker setup still running. Allow it to finish, then click Refresh checks."
     StrCpy $NetWatchActionRebootRequired "0"
     Call NetWatchHandleActionResult
   ${EndIf}
+  Return
+
+async_helper_interrupted:
+  ${NSD_KillTimer} NetWatchPollAsyncPrerequisite
+  Call NetWatchEndBusy
+  StrCpy $NetWatchActionSuccess "0"
+  StrCpy $NetWatchActionMessage "The NetWatch prerequisite helper stopped reporting progress. Endpoint security or another process may have interrupted setup. Do not reset or unregister WSL automatically; allow any Microsoft/Ubuntu/Docker setup still running to finish, then click Refresh checks or use the official manual setup links."
+  StrCpy $NetWatchActionRebootRequired "0"
+  Call NetWatchHandleActionResult
   Return
 
 async_state_ready:
@@ -363,8 +428,7 @@ async_state_ready:
   ${EndIf}
   Call NetWatchReadPrerequisiteState
   Call NetWatchEndBusy
-  ; Every helper writes a brand-new post-operation status snapshot. Consuming it
-  ; here is the automatic re-probe: no cached pre-operation state survives.
+  ; A completed helper always contains a fresh post-operation probe snapshot.
   Call NetWatchHandleActionResult
 FunctionEnd
 
@@ -448,7 +512,10 @@ Function NetWatchUpdatePreflightControls
     ${If} $NetWatchDistroReady == "1"
       StrCpy $0 "$0$\r$\nWSL2 runtime: verified ($NetWatchDistroName)"
     ${ElseIf} $NetWatchDistroInstalled == "1"
-      StrCpy $0 "$0$\r$\nWSL2 runtime: distro installed but first-run initialization is incomplete ($NetWatchDistroName)"
+    ${AndIf} $NetWatchDistroProvisioned != "1"
+      StrCpy $0 "$0$\r$\nWSL2 runtime: distro installed but Linux user initialization is incomplete ($NetWatchDistroName)"
+    ${ElseIf} $NetWatchDistroInstalled == "1"
+      StrCpy $0 "$0$\r$\nWSL2 runtime: distro initialized, but execution verification failed ($NetWatchDistroName)"
     ${ElseIf} $NetWatchWslPlatformReady == "1"
       StrCpy $0 "$0$\r$\nWSL2 runtime: platform prepared; install Ubuntu to verify execution"
     ${Else}
@@ -519,7 +586,7 @@ Function NetWatchUpdatePreflightControls
       ${NSD_SetText} $NetWatchDistroButton "WSL distro ready"
       EnableWindow $NetWatchDistroButton 0
     ${ElseIf} $NetWatchDistroInstalled == "1"
-      ${NSD_SetText} $NetWatchDistroButton "Initialize WSL distro"
+      ${NSD_SetText} $NetWatchDistroButton "Finish WSL distro setup"
       EnableWindow $NetWatchDistroButton 1
     ${Else}
       ${NSD_SetText} $NetWatchDistroButton "Install Ubuntu"
@@ -600,7 +667,7 @@ Function NetWatchInstallOrUpdateWsl
     Call NetWatchOfferRebootResume
     Return
   ${EndIf}
-  MessageBox MB_YESNO|MB_ICONQUESTION "NetWatch can enable the two Microsoft WSL2 Windows features and install/update Microsoft's WSL package.$\r$\n$\r$\nOnly this fixed-purpose helper requests UAC administrator approval; NetWatch Setup itself remains a current-user process. A restart may be required. Ubuntu is a separate later step.$\r$\n$\r$\nContinue?" IDNO wsl_action_done
+  MessageBox MB_YESNO|MB_ICONQUESTION "NetWatch can enable the two Microsoft WSL2 Windows features and install/update Microsoft's WSL package.$\r$\n$\r$\nOnly this fixed-purpose native helper requests UAC administrator approval; NetWatch Setup itself remains a current-user process. A restart may be required. Ubuntu is a separate later step.$\r$\n$\r$\nContinue?" IDNO wsl_action_done
   StrCpy $NetWatchAsyncMessage "Working: applying Windows WSL2 prerequisites.$\r$\nThis can take several minutes. Keep NetWatch Setup open; Windows may show its own WSL download progress window."
   Call NetWatchStartAsyncElevatedWslHelper
 wsl_action_done:
@@ -669,7 +736,7 @@ Function NetWatchPreflightPageCreate
   ${NSD_CreateLabel} 0 0 100% 88u "Checking prerequisites..."
   Pop $NetWatchStatusLabel
 
-  ; Indeterminate/marquee progress: prerequisite helpers do not expose a
+  ; Indeterminate/marquee progress: prerequisite helper does not expose a
   ; trustworthy percentage. A moving segment shows activity without implying
   ; fake completion progress. The control keeps the normal Windows visual style.
   ${NSD_CreateProgressBar} 0 94u 100% 8u ""

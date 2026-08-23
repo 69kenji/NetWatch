@@ -74,9 +74,9 @@ The packaged application includes Electron/Chromium/Node and JavaScript dependen
 
 Third-party names and trademarks are used only for identification. NetWatch's license does not grant rights to third-party trademarks.
 
-## Go runtime — bundled video surface helper
+## Go runtime — project-owned Windows helpers
 
-- Toolchain used for the helper: Go 1.23.2
+- Toolchain used for the helpers: Go 1.23.2
 - License: BSD-style Go license
 
-NetWatch's project-owned `netwatch-surface-helper.exe` is built from source under `native/surface-helper/` and statically includes portions of the Go runtime/standard library. It only manages the embedded mpv child window and does not launch processes. The upstream Go license text is distributed as `resources/native/GO-LICENSE.txt`.
+NetWatch's project-owned `netwatch-surface-helper.exe` (`native/surface-helper/`) and installer-only `netwatch-prerequisites.exe` (`native/prerequisite-helper/`) statically include portions of the Go runtime/standard library. The surface helper only manages the embedded mpv child window. The prerequisite helper has a fixed installer command surface for WSL/Ubuntu/Docker bootstrap and does not provide an arbitrary shell mode. The upstream Go license text is distributed as `resources/native/GO-LICENSE.txt`.

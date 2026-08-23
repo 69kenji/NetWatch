@@ -1,6 +1,6 @@
 {
   "name": "netwatch",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Self-hosted Windows media client with a Docker/VPN-isolated runtime",
   "license": "GPL-3.0-only",
   "main": "electron/main.js",

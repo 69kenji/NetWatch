@@ -65,7 +65,7 @@ function nativeWindowHandleToDecimal(win) {
 function resolveMpvExecutable() {
   const configured = process.env.NETWATCH_MPV_PATH
   if (configured) {
-    // pkg34 launches the actual GUI-subsystem mpv executable directly from
+    // NetWatch 1.0.3+ launches the actual GUI-subsystem mpv executable directly from
     // Electron. Prefer mpv.exe over the small console wrapper so there is no
     // intermediate console process and no need to hide a child console.
     if (process.platform === 'win32' && path.basename(configured).toLowerCase() === 'mpv.com') {
@@ -403,7 +403,7 @@ class MpvController extends EventEmitter {
     await this._observeProperties()
 
     // Keep the existing surface-sync call site so fullscreen/restore behavior
-    // can be compared directly with 1.0.2. In the pkg34 experiment this method
+    // remains isolated from launch behavior. This method
     // deliberately performs no Win32 manipulation; mpv owns --wid embedding.
     await this.syncVideoSurface(videoWindow, 5000)
 
@@ -435,7 +435,7 @@ class MpvController extends EventEmitter {
 
     if (!parentHwnd) return null
 
-    // pkg35 keeps the successful direct Electron -> mpv launch from pkg34 and
+    // NetWatch 1.0.3+ keeps direct Electron -> mpv launch and
     // restores only the Win32 surface fitting required to make mpv's --wid
     // child visible. The helper cannot launch processes or invoke a shell.
     if (

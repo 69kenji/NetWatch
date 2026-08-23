@@ -83,7 +83,9 @@ You will need:
 - TMDB, OpenSubtitles, and SubDL API keys.
 - Prowlarr with at least one usable indexer and its API key.
 
-The Windows installer can guide you through installing or enabling WSL, Ubuntu, and Docker Desktop when needed. Launch Setup normally; do not use **Run as administrator**.
+The Windows installer can guide you through installing or enabling WSL, Ubuntu, and Docker Desktop when needed. Launch Setup normally; do not use **Run as administrator**. NetWatch 1.0.4 uses a fixed-purpose native prerequisite helper rather than PowerShell for these setup actions. Only the explicit WSL feature/package action requests UAC; Ubuntu and Docker remain current-user steps.
+
+If endpoint security interrupts prerequisite setup, NetWatch stops waiting when the helper heartbeat disappears and reports the interruption instead of treating a partial install as ready. Allow any trusted Microsoft/Ubuntu/Docker setup process already running to finish, then use **Refresh checks** or the official manual setup links. Do not globally allow-list `powershell.exe` or disable endpoint protection just for NetWatch.
 
 > **TorrentDownload:** this indexer proved unreliable during 1.0 testing. Prowlarr grabs can resolve to magnets whose reported swarm counts do not reflect usable peers. Prefer another general-purpose indexer.
 
@@ -132,7 +134,7 @@ Packaged state lives under:
 
 ## Player process model
 
-NetWatch 1.0.3 launches the bundled `mpv.exe` process directly from Electron with Node's shell-free `child_process.spawn` path. Normal playback does not invoke PowerShell, WMI scripting, `Add-Type`, `csc.exe`, or a project-owned launcher helper. The pkg34 candidate intentionally lets mpv manage its own `--wid` child-window embedding so the previous helper-based process/window workaround can be tested independently against third-party endpoint protection.
+NetWatch 1.0.3+ launches bundled `mpv.exe` directly from Electron with Node's shell-free `child_process.spawn` path. A small project-owned `netwatch-surface-helper.exe` only locates, shows, and resizes mpv's existing embedded child window. It cannot launch processes and performs no network access. Normal playback does not invoke PowerShell, WMI scripting, `Add-Type`, or `csc.exe`.
 
 ## Build from source
 
@@ -168,7 +170,7 @@ npm run package:win
 The release artifact is written as:
 
 ```text
-release\NetWatch-Setup-1.0.2.exe
+release\NetWatch-Setup-1.0.4.exe
 ```
 
 Use `npm ci` for reproducible builds. Do not replace it with `npm install` and do not use `npm audit fix --force`.

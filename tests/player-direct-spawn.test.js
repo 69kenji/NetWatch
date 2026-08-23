@@ -31,7 +31,7 @@ test('Windows player launches mpv directly as a detached Electron child', () => 
   assert.match(controller, /this\.process = launched\.child/)
 })
 
-test('pkg35 packages a surface-only helper', () => {
+test('packages a surface-only helper', () => {
   assert.match(controller, /netwatch-surface-helper\.exe/)
   assert.match(controller, /startMpvSurfaceWatcherOnWindows/)
 

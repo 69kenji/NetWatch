@@ -12,7 +12,7 @@ This is a traffic-isolation design, not an anonymity system.
 
 NetWatch 1.0.x is designed so that:
 
-- Windows-side NetWatch components use localhost/IPC rather than direct Internet connections.
+- During normal NetWatch runtime, Windows-side NetWatch components use localhost/IPC rather than direct Internet connections.
 - Backend, torrent-engine, Prowlarr, and FlareSolverr share the VPN service's network namespace.
 - Ordinary Internet traffic from that namespace leaves through `wg0`.
 - WireGuard failure blocks application traffic instead of falling back to Docker's normal egress.
@@ -74,6 +74,12 @@ Electron and mpv are local application components. Their intended network depend
 Loopback reduces remote exposure but is not an authentication boundary against other processes already running in the same Windows session.
 
 First-run credential entry uses separate sandboxed Electron windows with narrow preload APIs. They do not expose generic filesystem, shell, secret-readback, or arbitrary-URL IPC.
+
+### Installer prerequisite bootstrap
+
+The normal-runtime egress invariant begins after WSL/Docker prerequisites exist. The Windows NSIS bootstrap is a separate trust phase: with explicit user approval it may invoke Microsoft `wsl.exe`/Windows servicing and may download Docker Desktop directly from Docker's pinned `desktop.docker.com` HTTPS endpoint before the inner VPN runtime exists. NetWatch 1.0.4 performs these actions through a fixed-purpose native helper rather than PowerShell. The Docker download is size/redirect bounded and the installer must pass Windows Authenticode validation with a Docker Inc. signer identity before execution.
+
+This bootstrap exception does not authorize the installed Electron application, mpv, backend, torrent engine, Prowlarr, or FlareSolverr to bypass the inner VPN during normal operation.
 
 ### WSL and Docker
 
