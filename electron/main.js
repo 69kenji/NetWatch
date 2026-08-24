@@ -1,4 +1,4 @@
-const { app, BaseWindow, BrowserWindow, dialog, ipcMain, session, shell } = require('electron')
+const { app, BaseWindow, BrowserWindow, dialog, ipcMain, net, protocol, session, shell } = require('electron')
 const path = require('path')
 const { pathToFileURL } = require('url')
 const { spawn } = require('child_process')
@@ -7,6 +7,11 @@ const { MpvController } = require('./mpv-controller')
 const { METADATA_PREPARATION_TIMEOUT_MS, metadataPreparationTimedOut } = require('./preparation-policy')
 const { playerFullscreenShortcutAction } = require('./player-shortcuts')
 const { VPNBOOK_REFRESH_URL, normalizeVpnProfileType, wireGuardFileTimestamps } = require('./vpn-profile')
+
+protocol.registerSchemesAsPrivileged([{
+  scheme: 'app',
+  privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true },
+}])
 
 // Keep this copied development Electron build away from Electron's shared/default
 // cache directories. Multiple local Electron copies can otherwise contend for the
@@ -107,12 +112,35 @@ function defaultPlayerPreparation() {
 
 function rendererUrl() {
   if (useViteDevServer) return 'http://localhost:5173/'
-  return pathToFileURL(path.join(__dirname, '../dist/index.html')).toString()
+  return 'app://netwatch/index.html'
 }
 
 function playerRendererUrl() {
   if (useViteDevServer) return 'http://localhost:5173/player.html'
-  return pathToFileURL(path.join(__dirname, '../dist/player.html')).toString()
+  return 'app://netwatch/player.html'
+}
+
+async function registerAppProtocol() {
+  if (useViteDevServer) return
+  const distRoot = path.resolve(__dirname, '../dist')
+  await protocol.handle('app', request => {
+    try {
+      const parsed = new URL(request.url)
+      if (parsed.hostname !== 'netwatch' || parsed.username || parsed.password || parsed.port) {
+        return new Response('Not found', { status: 404 })
+      }
+      const requested = decodeURIComponent(parsed.pathname || '/').replace(/^\/+/, '') || 'index.html'
+      const target = path.resolve(distRoot, requested)
+      const relative = path.relative(distRoot, target)
+      if (!relative || relative === '.') return new Response('Not found', { status: 404 })
+      if (relative.startsWith(`..${path.sep}`) || relative === '..' || path.isAbsolute(relative)) {
+        return new Response('Not found', { status: 404 })
+      }
+      return net.fetch(pathToFileURL(target).toString())
+    } catch {
+      return new Response('Not found', { status: 404 })
+    }
+  })
 }
 
 function isExpectedRendererUrl(candidateUrl, expectedUrl) {
@@ -159,7 +187,10 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       webSecurity: true,
+      webviewTag: false,
+      devTools: isDev && process.env.NETWATCH_DEVTOOLS === '1',
     },
     titleBarStyle: 'hidden',
     trafficLightPosition: { x: 16, y: 16 },
@@ -185,7 +216,10 @@ function createStartupErrorWindow(error) {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       webSecurity: true,
+      webviewTag: false,
+      devTools: false,
     },
   })
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>NetWatch startup error</title><style>
@@ -884,6 +918,22 @@ function assertWindowSender(event, window, label, expectedUrl) {
   ) {
     throw new Error(`Unauthorized ${label} IPC sender.`)
   }
+}
+
+
+function assertMainRendererSender(event) {
+  assertWindowSender(event, mainWindow, 'main renderer', rendererUrl())
+}
+
+function assertPlayerRendererSender(event) {
+  assertWindowSender(event, playerOverlayWindow, 'player renderer', playerRendererUrl())
+}
+
+function hardenDefaultSession() {
+  const ses = session.defaultSession
+  ses.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
+  ses.setPermissionCheckHandler(() => false)
+  ses.on('will-download', (_event, item) => item.cancel())
 }
 
 function hardenSetupSession(partitionName) {
@@ -1793,10 +1843,13 @@ async function createPlayerWindows() {
     closable: false,
     skipTaskbar: true,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'player-preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       webSecurity: true,
+      webviewTag: false,
+      devTools: isDev && process.env.NETWATCH_DEVTOOLS === '1',
     },
   })
   playerOverlayWindow.setMenuBarVisibility(false)
@@ -2132,19 +2185,23 @@ async function monitorTorrentPreparation(infoHash, source, generation) {
 }
 
 async function runTorrentAddAndPreparation(payload, generation) {
-  const torrentSource = payload.torrentSource.trim()
+  const releaseRef = typeof payload.releaseRef === 'string' ? payload.releaseRef.trim() : ''
+  const torrentSource = typeof payload.torrentSource === 'string' ? payload.torrentSource.trim() : ''
   const mediaName = payload.mediaName || payload.title || 'NetWatch media'
-  const expectedHash = payload.expectedHash || extractBtih(torrentSource) || null
+  const expectedHash = payload.expectedHash || (torrentSource ? extractBtih(torrentSource) : null) || null
 
   try {
+    const addPayload = {
+      media_name: mediaName,
+      expected_hash: expectedHash,
+    }
+    if (releaseRef) addPayload.release_ref = releaseRef
+    else addPayload.magnet = torrentSource
+
     const added = await backendJson('/api/torrents/add', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        magnet: torrentSource,
-        media_name: mediaName,
-        expected_hash: expectedHash,
-      }),
+      body: JSON.stringify(addPayload),
     }, 30_000)
 
     const infoHash = typeof added?.hash === 'string' ? added.hash.toLowerCase() : null
@@ -2196,7 +2253,8 @@ async function openPreparingPlayerSession(payload) {
   await mpv.stop({ graceful: false })
 
   const generation = ++playerPreparationGeneration
-  const expectedHash = payload.infoHash || payload.expectedHash || extractBtih(payload.torrentSource) || null
+  const directSource = typeof payload.torrentSource === 'string' ? payload.torrentSource : ''
+  const expectedHash = payload.infoHash || payload.expectedHash || (directSource ? extractBtih(directSource) : null) || null
 
   playerSession = {
     source: payload.source || null,
@@ -2221,13 +2279,16 @@ async function openPreparingPlayerSession(payload) {
   return generation
 }
 
-async function openTorrentSession(payload) {
-  if (!payload || typeof payload.torrentSource !== 'string' || !payload.torrentSource.trim()) {
-    throw new Error('player.openTorrent requires a torrent source')
+async function openTorrentSession(payload, { allowDirectSource = false } = {}) {
+  const releaseRef = typeof payload?.releaseRef === 'string' ? payload.releaseRef.trim() : ''
+  const torrentSource = typeof payload?.torrentSource === 'string' ? payload.torrentSource.trim() : ''
+  if (!releaseRef && !(allowDirectSource && torrentSource.toLowerCase().startsWith('magnet:?'))) {
+    throw new Error('player.openTorrent requires a backend-issued release reference')
   }
 
-  const generation = await openPreparingPlayerSession(payload)
-  void runTorrentAddAndPreparation(payload, generation)
+  const normalizedPayload = { ...payload, releaseRef, torrentSource: allowDirectSource ? torrentSource : '' }
+  const generation = await openPreparingPlayerSession(normalizedPayload)
+  void runTorrentAddAndPreparation(normalizedPayload, generation)
   return {
     session: playerSession,
     state: mpv.getState(),
@@ -2489,6 +2550,8 @@ mpv.on('state', state => sendToPlayerRenderer('player:state', state))
 mpv.on('log', entry => sendToPlayerRenderer('player:log', entry))
 
 app.whenReady().then(async () => {
+  await registerAppProtocol()
+  hardenDefaultSession()
   // Player-core smoke mode remains independent of the main GUI/orchestrator.
   // Existing smoke scripts can keep owning Vite/Docker exactly as before.
   // The torrent-source variant exercises the exact production lifecycle: open
@@ -2500,7 +2563,7 @@ app.whenReady().then(async () => {
         expectedHash: process.env.NETWATCH_PLAYER_TEST_EXPECTED_HASH || null,
         title: process.env.NETWATCH_PLAYER_TEST_TITLE || 'NetWatch torrent player test',
         mediaName: process.env.NETWATCH_PLAYER_TEST_TITLE || 'NetWatch torrent player test',
-      })
+      }, { allowDirectSource: true })
     } catch (error) {
       console.error('[Player torrent test]', error)
       app.quit()
@@ -2591,25 +2654,26 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-// Main application window controls. The player now uses native Windows chrome.
-ipcMain.on('window:minimize', () => mainWindow?.minimize())
-ipcMain.on('window:maximize', () => mainWindow && (mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize()))
-ipcMain.on('window:close', () => mainWindow?.close())
+// Main application window controls. Every channel is authorized against the
+// exact top-level renderer that owns the capability.
+ipcMain.on('window:minimize', event => { assertMainRendererSender(event); mainWindow?.minimize() })
+ipcMain.on('window:maximize', event => { assertMainRendererSender(event); if (mainWindow) (mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize()) })
+ipcMain.on('window:close', event => { assertMainRendererSender(event); mainWindow?.close() })
 
 
-ipcMain.handle('runtime:get-status', () => ({ ...runtimeStatus, services: { ...runtimeStatus.services } }))
-ipcMain.handle('runtime:retry', () => retryRuntime())
-ipcMain.handle('runtime:vpn-sanity', () => vpnSanityCheck())
+ipcMain.handle('runtime:get-status', event => { assertMainRendererSender(event); return { ...runtimeStatus, services: { ...runtimeStatus.services } } })
+ipcMain.handle('runtime:retry', event => { assertMainRendererSender(event); return retryRuntime() })
+ipcMain.handle('runtime:vpn-sanity', event => { assertMainRendererSender(event); return vpnSanityCheck() })
 ipcMain.handle('runtime:get-vpn-profile', async event => {
-  assertWindowSender(event, mainWindow, 'main renderer', rendererUrl())
+  assertMainRendererSender(event)
   return vpnProfileForRenderer()
 })
 ipcMain.handle('runtime:set-vpn-profile-type', async (event, profileType) => {
-  assertWindowSender(event, mainWindow, 'main renderer', rendererUrl())
+  assertMainRendererSender(event)
   return setVpnProfileType(profileType)
 })
 ipcMain.handle('runtime:replace-wireguard', async (event, profileType) => {
-  assertWindowSender(event, mainWindow, 'main renderer', rendererUrl())
+  assertMainRendererSender(event)
   const result = await chooseAndImportWireGuard(mainWindow, profileType, { confirmReplace: true, stageOnly: true })
   if (result.cancelled) return { cancelled: true, profile: await vpnProfileForRenderer(), restart_required: false }
   await logSetupEvent('WG_CONFIG_VALIDATED')
@@ -2617,27 +2681,31 @@ ipcMain.handle('runtime:replace-wireguard', async (event, profileType) => {
   return { cancelled: false, profile: { ...(result.profile || await vpnProfileForRenderer()), replacement_pending: true }, restart_required: true }
 })
 ipcMain.handle('runtime:open-vpnbook', async event => {
-  assertWindowSender(event, mainWindow, 'main renderer', rendererUrl())
+  assertMainRendererSender(event)
   await shell.openExternal(VPNBOOK_REFRESH_URL)
   return { opened: true }
 })
 ipcMain.handle('runtime:restart-app', event => {
-  assertWindowSender(event, mainWindow, 'main renderer', rendererUrl())
+  assertMainRendererSender(event)
   app.relaunch()
   app.quit()
   return { restarting: true }
 })
 
-// Native mpv player control. React never receives raw ipcRenderer or raw mpv IPC access.
-ipcMain.handle('player:open-torrent', (_, payload) => openTorrentSession(payload))
-ipcMain.handle('player:get-session', () => playerSession)
-ipcMain.handle('player:get-state', () => mpv.getState())
-ipcMain.handle('player:get-preparation', () => ({ ...playerPreparation }))
-ipcMain.handle('player:command', (_, action) => executePlayerCommand(action))
-ipcMain.handle('player:close', () => closePlayerSession())
-ipcMain.handle('player:set-fullscreen', (_, enabled) => setPlayerFullscreen(enabled))
-ipcMain.handle('player:toggle-fullscreen', () => setPlayerFullscreen(!(playerVideoWindow?.isFullScreen() || false)))
-ipcMain.handle('player:get-window-state', () => ({
-  fullscreen: Boolean(playerVideoWindow?.isFullScreen()),
-  maximized: Boolean(playerVideoWindow?.isMaximized()),
-}))
+// Native mpv player control. Opening a torrent belongs to the main renderer;
+// controls for an existing session belong only to the player overlay renderer.
+ipcMain.handle('player:open-torrent', (event, payload) => { assertMainRendererSender(event); return openTorrentSession(payload) })
+ipcMain.handle('player:get-session', event => { assertPlayerRendererSender(event); return playerSession })
+ipcMain.handle('player:get-state', event => { assertPlayerRendererSender(event); return mpv.getState() })
+ipcMain.handle('player:get-preparation', event => { assertPlayerRendererSender(event); return { ...playerPreparation } })
+ipcMain.handle('player:command', (event, action) => { assertPlayerRendererSender(event); return executePlayerCommand(action) })
+ipcMain.handle('player:close', event => { assertPlayerRendererSender(event); return closePlayerSession() })
+ipcMain.handle('player:set-fullscreen', (event, enabled) => { assertPlayerRendererSender(event); return setPlayerFullscreen(enabled) })
+ipcMain.handle('player:toggle-fullscreen', event => { assertPlayerRendererSender(event); return setPlayerFullscreen(!(playerVideoWindow?.isFullScreen() || false)) })
+ipcMain.handle('player:get-window-state', event => {
+  assertPlayerRendererSender(event)
+  return {
+    fullscreen: Boolean(playerVideoWindow?.isFullScreen()),
+    maximized: Boolean(playerVideoWindow?.isMaximized()),
+  }
+})

@@ -21,4 +21,7 @@ EXPOSE 8000
 
 USER 1000:1000
 
+# Intentionally listen on the shared namespace interfaces: Docker host-port
+# publication DNATs to the namespace eth0 address. Remote VPN-peer access
+# to NetWatch control ports is blocked by the wg0 INPUT firewall rule.
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

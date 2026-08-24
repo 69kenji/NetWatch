@@ -62,7 +62,12 @@ func validStatePath(state string) bool {
 		return false
 	}
 	temp = strings.TrimRight(filepath.Clean(temp), `\/`) + string(os.PathSeparator)
-	return strings.HasPrefix(strings.ToLower(clean), strings.ToLower(temp))
+	if !strings.HasPrefix(strings.ToLower(clean), strings.ToLower(temp)) {
+		return false
+	}
+	// Refuse junctions/symlinks anywhere in the state parent chain. The
+	// elevated action otherwise risks writing through a same-user reparse point.
+	return !pathHasReparsePoint(filepath.Dir(clean))
 }
 
 func executeAction(action string, sw *stateWriter) actionResult {

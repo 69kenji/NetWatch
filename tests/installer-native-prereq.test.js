@@ -14,9 +14,9 @@ const helperSignature = fs.readFileSync(path.join(root, 'native/prerequisite-hel
 const runtimeVersion = fs.readFileSync(path.join(root, 'packaging/runtime-version.txt'), 'utf8').trim()
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
 
-test('1.0.4 installer packages a native prerequisite helper and no PowerShell host', () => {
-  assert.equal(pkg.version, '1.0.4')
-  assert.equal(runtimeVersion, '1.0.4-pkg37')
+test('1.0.5 installer packages a native prerequisite helper and no PowerShell host', () => {
+  assert.equal(pkg.version, '1.0.5')
+  assert.equal(runtimeVersion, '1.0.5-pkg38')
   assert.ok(fs.existsSync(path.join(root, 'build/netwatch-prerequisites.exe')))
   assert.ok(fs.existsSync(path.join(root, 'native/prerequisite-helper/main.go')))
   assert.equal(fs.existsSync(path.join(root, 'build/prerequisites.ps1')), false)

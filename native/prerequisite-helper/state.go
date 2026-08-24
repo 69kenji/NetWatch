@@ -61,6 +61,9 @@ func newStateWriter(path, action string) (*stateWriter, error) {
 		return nil, fmt.Errorf("state path must be absolute")
 	}
 	parent := filepath.Dir(path)
+	if pathHasReparsePoint(parent) {
+		return nil, fmt.Errorf("state directory contains a reparse point")
+	}
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return nil, fmt.Errorf("create state directory: %w", err)
 	}
@@ -125,6 +128,9 @@ func (sw *stateWriter) finish(status prereqStatus, result actionResult) error {
 }
 
 func (sw *stateWriter) writeLocked() error {
+	if pathHasReparsePoint(filepath.Dir(sw.path)) || pathHasReparsePoint(sw.path) {
+		return fmt.Errorf("state path contains a reparse point")
+	}
 	run := map[string]string{
 		"Protocol":  "2",
 		"Action":    sw.action,
@@ -148,6 +154,9 @@ func (sw *stateWriter) writeLocked() error {
 	writeINIMap(&b, action)
 
 	temp := sw.path + ".tmp"
+	if pathHasReparsePoint(temp) {
+		return fmt.Errorf("temporary state path contains a reparse point")
+	}
 	if err := os.WriteFile(temp, []byte(b.String()), 0o600); err != nil {
 		return fmt.Errorf("write state: %w", err)
 	}

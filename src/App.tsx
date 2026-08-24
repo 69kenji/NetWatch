@@ -40,6 +40,7 @@ import {
   type ResultSort,
   type NetWatchView,
   type TorrentSearchResult,
+  assertReleaseReferences,
   resultSource,
 } from './types/torrents'
 
@@ -155,7 +156,9 @@ async function fetchMovieStreamOptions(tmdbId: number): Promise<MovieStreamOptio
       `${BACKEND_BASE_URL}/api/metadata/movies/${encodeURIComponent(String(tmdbId))}/stream-options?min_seeders=1`,
       { signal: controller.signal },
     )
-    return await readJsonResponse(response) as MovieStreamOptions
+    const payload = await readJsonResponse(response) as MovieStreamOptions
+    assertReleaseReferences(payload.results)
+    return payload
   } finally {
     window.clearTimeout(timer)
   }
@@ -485,7 +488,7 @@ export default function App() {
 
     try {
       await window.electron.player.openTorrent({
-        torrentSource: source,
+        releaseRef: source,
         title: movie.title,
         mediaName: movie.title,
         expectedHash: result.info_hash || null,
@@ -518,7 +521,7 @@ export default function App() {
     setSeriesError(null)
     try {
       await window.electron.player.openTorrent({
-        torrentSource: source,
+        releaseRef: source,
         title: playerTitle,
         mediaName: `${series.title} ${code}`,
         expectedHash: result.info_hash || null,

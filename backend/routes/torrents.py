@@ -4,16 +4,17 @@ import os
 import re
 import time
 from contextlib import suppress
-from typing import Optional
+from typing import Annotated, Optional
 
 import aiofiles
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Path as ApiPath, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from services.exceptions import DependencyUnavailableError
 from services.prowlarr import ProwlarrService
 from services.release_search import ReleaseSearchService
+from services.release_refs import ReleaseReferenceStore
 from services.torrent_engine import (
     RangeRequestCancelledError,
     RangeRequestSupersededError,
@@ -21,14 +22,11 @@ from services.torrent_engine import (
 )
 
 router = APIRouter()
-PLAYBACK_READY_TIMEOUT_SECONDS = 180.0
 STARTUP_PREFIX_MIN_BYTES = 4 * 1024 * 1024
 STARTUP_PREFIX_MAX_BYTES = 8 * 1024 * 1024
 STARTUP_PREFIX_PIECES = 2
 STREAM_CHUNK_BYTES = 4 * 1024 * 1024
 STREAM_RANGE_WAIT_SECONDS = 240.0
-METADATA_REANNOUNCE_SECONDS = 10.0
-METADATA_TIMEOUT_SECONDS = 60.0
 STREAM_DISCONNECT_POLL_SECONDS = 0.1
 _stream_request_generation = 0
 
@@ -94,18 +92,59 @@ async def _wait_for_stream_range(
         raise
 
 
+INFO_HASH_PATTERN = r"^[0-9A-Fa-f]{40}(?:[0-9A-Fa-f]{24})?$"
+InfoHash = Annotated[str, ApiPath(pattern=INFO_HASH_PATTERN)]
+RELEASE_REF_PATTERN = r"^[A-Za-z0-9_-]{32,128}$"
+RESOLUTION_FILTERS = {"2160p", "1080p", "720p", "480p"}
+MAX_MAGNET_LENGTH = 16 * 1024
+
+
 class AddTorrentRequest(BaseModel):
-    magnet: str
-    media_name: str
-    expected_hash: Optional[str] = None
+    release_ref: Optional[str] = Field(default=None, min_length=32, max_length=128, pattern=RELEASE_REF_PATTERN)
+    # Direct sources are retained for local lifecycle tooling, but HTTP(S) URLs
+    # are intentionally forbidden here. Provider URLs must arrive through an
+    # opaque release_ref so credentials never need to cross into the renderer.
+    magnet: Optional[str] = Field(default=None, min_length=8, max_length=MAX_MAGNET_LENGTH)
+    media_name: str = Field(min_length=1, max_length=240)
+    expected_hash: Optional[str] = Field(default=None, pattern=INFO_HASH_PATTERN)
+
+    @field_validator("release_ref", "magnet", "media_name", mode="before")
+    @classmethod
+    def _strip_strings(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("expected_hash")
+    @classmethod
+    def _normalize_expected_hash(cls, value: Optional[str]) -> Optional[str]:
+        return value.lower() if value else None
+
+    @model_validator(mode="after")
+    def _validate_source(self):
+        if bool(self.release_ref) == bool(self.magnet):
+            raise ValueError("exactly one of release_ref or magnet is required")
+        if self.magnet and not self.magnet.lower().startswith("magnet:?"):
+            raise ValueError("direct torrent sources must be magnet URIs")
+        return self
 
 
 class SearchRequest(BaseModel):
-    query: str
-    imdb_id: Optional[str] = None
-    category: Optional[int] = None
-    resolution_filter: Optional[str] = None
-    min_seeders: int = 0
+    query: str = Field(min_length=1, max_length=200)
+    imdb_id: Optional[str] = Field(default=None, min_length=1, max_length=32)
+    category: Optional[int] = Field(default=None, ge=0, le=100000)
+    resolution_filter: Optional[str] = Field(default=None, max_length=16)
+    min_seeders: int = Field(default=0, ge=0, le=100000)
+
+    @field_validator("query", "imdb_id", "resolution_filter", mode="before")
+    @classmethod
+    def _strip_optional_strings(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("resolution_filter")
+    @classmethod
+    def _validate_resolution_filter(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and value not in RESOLUTION_FILTERS:
+            raise ValueError("resolution_filter must be one of 2160p, 1080p, 720p, 480p")
+        return value
 
 
 def dependency_503(exc: DependencyUnavailableError) -> HTTPException:
@@ -132,28 +171,53 @@ async def search_torrents(req: SearchRequest):
 
 @router.post("/add")
 async def add_torrent(req: AddTorrentRequest):
+    release_ref = req.release_ref
     try:
-        if req.magnet.lower().startswith("magnet:?"):
+        source = req.magnet
+        expected_hash = req.expected_hash
+        if release_ref:
+            stored = ReleaseReferenceStore.resolve(release_ref)
+            if stored is None:
+                raise HTTPException(410, "Release reference expired; refresh the release list")
+            source = stored.source_url
+            if expected_hash and stored.expected_hash and expected_hash != stored.expected_hash:
+                raise HTTPException(400, "Release reference hash does not match expected_hash")
+            expected_hash = stored.expected_hash or expected_hash
+
+        if not source:
+            raise HTTPException(400, "Torrent source is missing")
+
+        if source.lower().startswith("magnet:?"):
             added = await TorrentEngineService.add_torrent(
-                req.magnet, req.media_name, expected_hash=req.expected_hash
+                source, req.media_name, expected_hash=expected_hash
             )
         else:
-            resolved = await ProwlarrService.resolve_torrent_source(req.magnet)
+            # Only opaque backend-issued references may resolve provider HTTP URLs.
+            if not release_ref:
+                raise HTTPException(400, "HTTP torrent sources require a release_ref")
+            resolved = await ProwlarrService.resolve_torrent_source(source)
 
             if resolved["source_type"] == "magnet":
                 added = await TorrentEngineService.add_torrent(
                     resolved["magnet"],
                     req.media_name,
-                    expected_hash=req.expected_hash,
+                    expected_hash=expected_hash,
                 )
                 added["source_resolution"] = "prowlarr_redirect_to_magnet"
             else:
                 added = await TorrentEngineService.add_torrent_file(
                     resolved["torrent_bytes"],
                     req.media_name,
-                    expected_hash=req.expected_hash,
+                    expected_hash=expected_hash,
                 )
                 added["source_resolution"] = "prowlarr_torrent_file"
+
+        if release_ref:
+            # Consume only after the source has been successfully accepted so a
+            # transient dependency error does not force the user to re-search.
+            ReleaseReferenceStore.discard(release_ref)
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except DependencyUnavailableError as exc:
@@ -162,7 +226,7 @@ async def add_torrent(req: AddTorrentRequest):
 
 
 @router.get("/progress/{info_hash}")
-async def torrent_progress(info_hash: str):
+async def torrent_progress(info_hash: InfoHash):
     try:
         progress = await TorrentEngineService.get_progress(info_hash)
     except DependencyUnavailableError as exc:
@@ -173,7 +237,7 @@ async def torrent_progress(info_hash: str):
 
 
 @router.get("/files/{info_hash}")
-async def torrent_files(info_hash: str):
+async def torrent_files(info_hash: InfoHash):
     try:
         progress = await TorrentEngineService.get_progress(info_hash)
         if not progress:
@@ -185,7 +249,7 @@ async def torrent_files(info_hash: str):
 
 
 @router.get("/status/{info_hash}")
-async def torrent_status(info_hash: str):
+async def torrent_status(info_hash: InfoHash):
     try:
         status = await TorrentEngineService.get_status(info_hash)
     except DependencyUnavailableError as exc:
@@ -272,13 +336,13 @@ async def startup_prefix_status(info_hash: str, video_file: dict) -> dict:
 
 
 @router.get("/playback-status/{info_hash}")
-async def playback_status(info_hash: str, reannounce: bool = False):
+async def playback_status(info_hash: InfoHash, reannounce: bool = False):
     """Return non-blocking playback preparation state for the desktop player.
 
     The desktop player opens immediately after source selection and polls this
     endpoint while libtorrent acquires metadata and a small verified contiguous
-    prefix of the selected video. Unlike /await-ready this endpoint never sleeps,
-    times out, or deletes the candidate; closing the player remains the
+    prefix of the selected video. This endpoint never sleeps, times out, or
+    deletes the candidate; closing the player remains the
     authoritative cancellation path.
     """
     try:
@@ -378,156 +442,8 @@ async def playback_status(info_hash: str, reannounce: bool = False):
     return result
 
 
-async def reject_candidate_and_cleanup(
-    info_hash: str,
-    status_code: int,
-    detail: dict,
-) -> None:
-    """Delete a failed playback candidate before returning it to the caller.
-
-    Failed candidates must never remain queued in libtorrent: one dead/slow
-    torrent can otherwise block every fallback candidate behind it.
-    """
-    payload = dict(detail)
-    try:
-        payload["cleanup_verified"] = await TorrentEngineService.remove_torrent(
-            info_hash, delete_files=True, verify=True
-        )
-    except DependencyUnavailableError as exc:
-        payload["cleanup_verified"] = False
-        payload["cleanup_error"] = exc.message
-
-    raise HTTPException(status_code, detail=payload)
-
-
-@router.get("/await-ready/{info_hash}")
-async def await_ready(info_hash: str):
-    """Wait only until the selected torrent is safe to hand to mpv.
-
-    Direct libtorrent piece deadlines make the startup prefix time-critical,
-    while the HTTP stream independently gates every requested byte range on
-    verified pieces. Startup therefore needs only a small verified contiguous
-    prefix from the beginning of the selected video; the video's final piece is
-    intentionally not a launch prerequisite.
-    """
-    loop = asyncio.get_running_loop()
-    started_at = loop.time()
-    deadline = started_at + PLAYBACK_READY_TIMEOUT_SECONDS
-    reannounced = False
-    last_progress: dict = {}
-    last_prefix_status: dict = {}
-
-    try:
-        while loop.time() < deadline:
-            try:
-                progress = await TorrentEngineService.get_progress(info_hash)
-                if not progress:
-                    raise HTTPException(404, "Torrent not found")
-                last_progress = progress
-
-                elapsed = loop.time() - started_at
-                state = str(progress.get("state") or "unknown")
-                file_state = await TorrentEngineService.prepare_video_stream(info_hash)
-                video_file = file_state.get("video_file")
-
-                if not video_file:
-                    if not reannounced and elapsed >= METADATA_REANNOUNCE_SECONDS:
-                        await TorrentEngineService.reannounce(info_hash)
-                        reannounced = True
-                    if elapsed >= METADATA_TIMEOUT_SECONDS:
-                        await reject_candidate_and_cleanup(
-                            info_hash,
-                            409,
-                            {
-                                "stage": "metadata",
-                                "retryable": True,
-                                "state": state,
-                                "message": "torrent metadata/file list did not become playable",
-                            },
-                        )
-                    await asyncio.sleep(0.5)
-                    continue
-
-                prefix_status = await startup_prefix_status(info_hash, video_file)
-                last_prefix_status = prefix_status
-
-                if prefix_status["ready"]:
-                    progress = await TorrentEngineService.get_progress(info_hash)
-                    return {
-                        "ready": True,
-                        "path": video_file["path"],
-                        "progress": progress.get("progress", 0.0),
-                        "dl_speed": progress.get("dl_speed", 0),
-                        "buffered_bytes": prefix_status.get("buffered_bytes", 0),
-                        "buffer_target_bytes": prefix_status.get("target_bytes", 0),
-                        "first_piece": prefix_status.get("first_piece"),
-                        "last_piece": prefix_status.get("last_piece"),
-                        "seq_dl": progress.get("seq_dl", False),
-                        "f_l_piece_prio": progress.get("f_l_piece_prio", False),
-                        "force_start": progress.get("force_start", False),
-                    }
-
-                waiting_for = prefix_status.get("waiting_for")
-                piece_states_available = int(prefix_status.get("piece_states_available") or 0)
-
-                if waiting_for in {"piece_geometry", "piece_states"}:
-                    if not reannounced and elapsed >= METADATA_REANNOUNCE_SECONDS:
-                        await TorrentEngineService.reannounce(info_hash)
-                        reannounced = True
-                    if elapsed >= METADATA_TIMEOUT_SECONDS:
-                        await reject_candidate_and_cleanup(
-                            info_hash,
-                            409,
-                            {
-                                "stage": "metadata",
-                                "retryable": True,
-                                "state": state,
-                                "piece_states_available": piece_states_available,
-                                "message": "torrent metadata/piece map did not become available",
-                            },
-                        )
-
-                await asyncio.sleep(0.20)
-
-            except HTTPException:
-                raise
-            except DependencyUnavailableError as exc:
-                raise dependency_503(exc) from exc
-
-        await reject_candidate_and_cleanup(
-            info_hash,
-            408,
-            {
-                "stage": "startup",
-                "retryable": True,
-                "state": str(last_progress.get("state") or "unknown"),
-                "progress": float(last_progress.get("progress") or 0.0),
-                "dl_speed": int(last_progress.get("dl_speed") or 0),
-                "downloaded": int(last_progress.get("downloaded") or 0),
-                "seq_dl": bool(last_progress.get("seq_dl")),
-                "f_l_piece_prio": bool(last_progress.get("f_l_piece_prio")),
-                "force_start": bool(last_progress.get("force_start")),
-                "buffered_bytes": int(last_prefix_status.get("buffered_bytes") or 0),
-                "buffer_target_bytes": int(last_prefix_status.get("target_bytes") or 0),
-                "waiting_for": last_prefix_status.get("waiting_for"),
-                "message": (
-                    f"verified video startup prefix was not ready within "
-                    f"{PLAYBACK_READY_TIMEOUT_SECONDS:.0f}s"
-                ),
-            },
-        )
-    except asyncio.CancelledError:
-        try:
-            await TorrentEngineService.remove_torrent(
-                info_hash, delete_files=True, verify=True
-            )
-        except DependencyUnavailableError:
-            pass
-        raise
-
-
 @router.api_route("/stream/{info_hash}", methods=["GET", "HEAD"])
-async def stream_file(info_hash: str, request: Request):
+async def stream_file(info_hash: InfoHash, request: Request):
     """Serve only byte ranges whose backing torrent pieces are verified.
 
     libtorrent can preallocate the selected file to its final logical size long
@@ -674,7 +590,7 @@ async def stream_file(info_hash: str, request: Request):
 
 
 @router.delete("/{info_hash}")
-async def remove_torrent(info_hash: str, delete_files: bool = True):
+async def remove_torrent(info_hash: InfoHash, delete_files: bool = True):
     try:
         verified_absent = await TorrentEngineService.remove_torrent(
             info_hash, delete_files, verify=True

@@ -16,6 +16,29 @@ def sh(*args: str) -> str:
     ).stdout.strip()
 
 
+def verify_firewall_rules() -> str:
+    """Prove the exact NetWatch kill-switch/control-port rules and their order."""
+    script = r"""
+set -eu
+DOCKER_NET=$(ip -o -4 route show dev eth0 scope link | awk 'NR==1{print $1}')
+FWMARK=$(wg show wg0 fwmark)
+test -n "$DOCKER_NET"
+test -n "$FWMARK"
+test "$FWMARK" != "off"
+iptables -C OUTPUT -d "$DOCKER_NET" -j ACCEPT
+iptables -C OUTPUT ! -o wg0 -m mark ! --mark "$FWMARK" -m addrtype ! --dst-type LOCAL -j REJECT
+iptables -C INPUT -i wg0 -p tcp -m multiport --dports 8000,8081,8191,9696 -j REJECT
+FIRST_OUT=$(iptables -S OUTPUT | grep '^-A OUTPUT' | sed -n '1p')
+SECOND_OUT=$(iptables -S OUTPUT | grep '^-A OUTPUT' | sed -n '2p')
+FIRST_IN=$(iptables -S INPUT | grep '^-A INPUT' | sed -n '1p')
+case "$FIRST_OUT" in *"-d $DOCKER_NET -j ACCEPT"*) ;; *) echo "unexpected first OUTPUT rule: $FIRST_OUT"; exit 31;; esac
+case "$SECOND_OUT" in *"! -o wg0"*"-m mark ! --mark"*"-m addrtype ! --dst-type LOCAL"*"-j REJECT"*) ;; *) echo "unexpected second OUTPUT rule: $SECOND_OUT"; exit 32;; esac
+case "$FIRST_IN" in *"-i wg0"*"--dports 8000,8081,8191,9696"*"-j REJECT"*) ;; *) echo "unexpected first INPUT rule: $FIRST_IN"; exit 33;; esac
+printf '%s\n%s\n%s' "$FIRST_OUT" "$SECOND_OUT" "$FIRST_IN"
+"""
+    return sh("docker", "exec", "nw_vpn", "sh", "-lc", script)
+
+
 def active_nameservers(resolv_conf: str) -> list[str]:
     servers: list[str] = []
     for raw_line in resolv_conf.splitlines():
@@ -52,8 +75,8 @@ def main() -> int:
         fwmark = sh("docker", "exec", "nw_vpn", "wg", "show", "wg0", "fwmark")
         require(fwmark and fwmark != "off", "WireGuard fwmark is missing")
 
-        output_rules = sh("docker", "exec", "nw_vpn", "iptables", "-S", "OUTPUT")
-        require("-j REJECT" in output_rules and "--mark" in output_rules, "VPN kill-switch OUTPUT rule is missing")
+        firewall_rules = verify_firewall_rules()
+        require(bool(firewall_rules), "VPN kill-switch/control-port firewall verification returned no rules")
 
         ipv6 = sh("docker", "exec", "nw_vpn", "sysctl", "-n", "net.ipv6.conf.all.disable_ipv6")
         require(ipv6 == "1", "IPv6 is not disabled in the VPN namespace")

@@ -48,3 +48,35 @@ test('stopping mpv rejects a pending startup readiness wait', async () => {
   await controller.stop({ graceful: false })
   await assert.rejects(wait, /stopped during startup/)
 })
+
+test('seek buffering is latched only when a seek leaves the known cache window', async () => {
+  const { seekOutsideBufferedWindow } = require('../electron/mpv-controller')
+  const state = { position: 100, cacheDuration: 30 }
+  assert.equal(seekOutsideBufferedWindow(state, 110), false)
+  assert.equal(seekOutsideBufferedWindow(state, 140), true)
+  assert.equal(seekOutsideBufferedWindow(state, 80), false)
+  assert.equal(seekOutsideBufferedWindow(state, 60), true)
+
+  const controller = new MpvController()
+  controller._setState({ position: 100, cacheDuration: 5, seekBuffering: false })
+  controller.request = async () => null
+
+  await controller.execute({ type: 'seekAbsolute', seconds: 300 })
+  assert.equal(controller.getState().seekBuffering, true)
+
+  controller._handleMessage({ event: 'playback-restart' })
+  assert.equal(controller.getState().seekBuffering, false)
+})
+
+test('mpv seeking state is observed and clears the seek-buffer latch when restart completes', () => {
+  const controller = new MpvController()
+  controller._setState({ seekBuffering: true })
+
+  controller._handleMessage({ event: 'seek' })
+  assert.equal(controller.getState().seeking, true)
+  assert.equal(controller.getState().seekBuffering, true)
+
+  controller._handleProperty('seeking', false)
+  assert.equal(controller.getState().seeking, false)
+  assert.equal(controller.getState().seekBuffering, false)
+})

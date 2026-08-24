@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import binascii
-import re
 from typing import Optional
-from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 
@@ -30,29 +27,6 @@ class TorrentEngineService:
 
     _session: Optional[aiohttp.ClientSession] = None
     _base = settings.TORRENT_ENGINE_URL.rstrip("/")
-
-    @classmethod
-    def extract_info_hash(cls, source_url: str) -> Optional[str]:
-        """Extract a v1 BTIH or v2 BTMH hash from a magnet URI when available."""
-        if not source_url.lower().startswith("magnet:?"):
-            return None
-        try:
-            params = parse_qs(urlparse(source_url).query)
-            for value in params.get("xt", []):
-                lower = value.lower()
-                if lower.startswith("urn:btih:"):
-                    raw = value[9:].strip()
-                    if re.fullmatch(r"[0-9a-fA-F]{40}", raw):
-                        return raw.lower()
-                    if re.fullmatch(r"[A-Z2-7]{32}", raw, re.I):
-                        return base64.b32decode(raw.upper()).hex()
-                if lower.startswith("urn:btmh:1220"):
-                    raw = value[13:].strip()
-                    if re.fullmatch(r"[0-9a-fA-F]{64}", raw):
-                        return raw.lower()
-        except (ValueError, binascii.Error):
-            return None
-        return None
 
     @classmethod
     async def _ensure_session(cls) -> aiohttp.ClientSession:
@@ -148,17 +122,6 @@ class TorrentEngineService:
                 allow_404=True,
             )
         ) or {}
-
-    @classmethod
-    async def get_files(cls, info_hash: str):
-        data = await cls._json(
-            "GET",
-            f"/torrents/{info_hash.lower()}/files",
-            allow_404=True,
-        )
-        if not data:
-            return False, []
-        return bool(data.get("metadata_ready")), list(data.get("files") or [])
 
     @classmethod
     async def prepare_video_stream(cls, info_hash: str):

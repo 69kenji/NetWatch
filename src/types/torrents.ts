@@ -1,7 +1,6 @@
 export type TorrentSearchResult = {
   title: string
-  magnet?: string
-  source_url?: string
+  release_ref: string
   source_type?: string
   info_hash?: string | null
   size?: number
@@ -28,7 +27,16 @@ const RESOLUTION_WEIGHT: Record<string, number> = {
 }
 
 export function resultSource(result: TorrentSearchResult) {
-  return result.source_url || result.magnet || ''
+  return result.release_ref || ''
+}
+
+export function assertReleaseReferences(results: TorrentSearchResult[] | undefined) {
+  if (!Array.isArray(results) || results.length === 0) return
+  if (results.some(result => !result || typeof result.release_ref !== 'string' || !result.release_ref.trim())) {
+    throw new Error(
+      'NetWatch runtime is out of date. Restart NetWatch so the bundled backend can be refreshed, then try again.',
+    )
+  }
 }
 
 export function formatBytes(bytes = 0) {

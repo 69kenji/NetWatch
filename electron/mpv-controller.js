@@ -21,6 +21,7 @@ const OBSERVED_PROPERTIES = [
   'demuxer-cache-duration',
   'cache-buffering-state',
   'paused-for-cache',
+  'seeking',
   'cache-speed',
   'vo-configured',
   'current-vo',
@@ -50,6 +51,25 @@ function startupPlaybackReady(state) {
       // that point and is the string `no` when software decoding is active.
       && typeof state.hwdecCurrent === 'string'
   )
+}
+
+function seekOutsideBufferedWindow(state, target) {
+  const current = Number(state?.position)
+  const destination = Number(target)
+  if (!Number.isFinite(current) || !Number.isFinite(destination)) return false
+
+  const delta = destination - current
+  if (delta >= 0) {
+    const bufferedAhead = Math.max(0, Number(state?.cacheDuration) || 0)
+    // Leave a small margin because the reported demuxer cache duration is an
+    // estimate and can shrink while the seek command is being delivered.
+    return delta > Math.max(1, bufferedAhead - 1)
+  }
+
+  // mpv does not expose a simple "buffer behind" duration. Large backwards
+  // jumps may therefore need a fresh HTTP range even when the forward cache
+  // looks healthy. Small skip-back actions should stay visually instant.
+  return Math.abs(delta) > 30
 }
 
 function nativeWindowHandleToDecimal(win) {
@@ -265,6 +285,8 @@ class MpvController extends EventEmitter {
       cacheDuration: 0,
       cacheBufferingState: 0,
       pausedForCache: false,
+      seeking: false,
+      seekBuffering: false,
       cacheSpeed: 0,
       voConfigured: false,
       currentVo: null,
@@ -573,22 +595,31 @@ class MpvController extends EventEmitter {
     }
 
     if (message.event === 'file-loaded') {
-      this._setState({ status: this.state.paused ? 'paused' : 'playing', idle: false, eofReached: false })
+      this._setState({ status: this.state.paused ? 'paused' : 'playing', idle: false, eofReached: false, seeking: false, seekBuffering: false })
+      return
+    }
+
+    if (message.event === 'seek') {
+      // mpv can spend a long time restarting an HTTP-backed torrent after a
+      // seek without entering paused-for-cache. Keep the renderer informed
+      // that a restart is actively in progress; playback-restart (or the
+      // observable seeking property returning false) clears this state.
+      this._setState({ seeking: true })
       return
     }
 
     if (message.event === 'playback-restart') {
-      this._setState({ status: this.state.paused ? 'paused' : 'playing', idle: false })
+      this._setState({ status: this.state.paused ? 'paused' : 'playing', idle: false, seeking: false, seekBuffering: false })
       return
     }
 
     if (message.event === 'end-file') {
-      this._setState({ status: 'ended', eofReached: true })
+      this._setState({ status: 'ended', eofReached: true, seeking: false, seekBuffering: false })
       return
     }
 
     if (message.event === 'shutdown' && !this.stopping) {
-      this._setState({ status: 'idle', ready: false })
+      this._setState({ status: 'idle', ready: false, seeking: false, seekBuffering: false })
     }
   }
 
@@ -641,6 +672,12 @@ class MpvController extends EventEmitter {
         break
       case 'paused-for-cache':
         this._setState({ pausedForCache: Boolean(value) })
+        break
+      case 'seeking':
+        this._setState({
+          seeking: Boolean(value),
+          ...(!value ? { seekBuffering: false } : {}),
+        })
         break
       case 'cache-speed':
         if (Number.isFinite(value)) this._setState({ cacheSpeed: value })
@@ -729,10 +766,29 @@ class MpvController extends EventEmitter {
         return this.request(['set_property', 'pause', true])
       case 'togglePause':
         return this.request(['cycle', 'pause'])
-      case 'seekRelative':
-        return this.request(['seek', Number(action.seconds) || 0, 'relative+exact'])
-      case 'seekAbsolute':
-        return this.request(['seek', Math.max(0, Number(action.seconds) || 0), 'absolute+exact'])
+      case 'seekRelative': {
+        const seconds = Number(action.seconds) || 0
+        const target = Math.max(0, (Number(this.state.position) || 0) + seconds)
+        const showSeekBuffering = seekOutsideBufferedWindow(this.state, target)
+        if (showSeekBuffering) this._setState({ seekBuffering: true })
+        try {
+          return await this.request(['seek', seconds, 'relative+exact'])
+        } catch (error) {
+          if (showSeekBuffering) this._setState({ seekBuffering: false })
+          throw error
+        }
+      }
+      case 'seekAbsolute': {
+        const target = Math.max(0, Number(action.seconds) || 0)
+        const showSeekBuffering = seekOutsideBufferedWindow(this.state, target)
+        if (showSeekBuffering) this._setState({ seekBuffering: true })
+        try {
+          return await this.request(['seek', target, 'absolute+exact'])
+        } catch (error) {
+          if (showSeekBuffering) this._setState({ seekBuffering: false })
+          throw error
+        }
+      }
       case 'setVolume':
         return this.request(['set_property', 'volume', clamp(action.volume, 0, 150)])
       case 'setMute':
@@ -854,6 +910,7 @@ class MpvController extends EventEmitter {
 }
 
 module.exports = {
+  seekOutsideBufferedWindow,
   MpvController,
   nativeWindowHandleToDecimal,
   resolveMpvExecutable,

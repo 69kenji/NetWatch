@@ -4,6 +4,7 @@ import re
 from typing import Optional
 
 from services.prowlarr import ProwlarrService
+from services.release_refs import ReleaseReferenceStore
 
 _RESOLUTION_ORDER = {"2160p": 0, "1080p": 1, "720p": 2, "480p": 3, "Unknown": 4}
 _SOURCE_PREFERENCE = {"torrent_url": 2, "magnet": 1}
@@ -81,4 +82,21 @@ class ReleaseSearchService:
             _RESOLUTION_ORDER.get(str(item.get("resolution") or "Unknown"), 4),
             -int(item.get("seeders") or 0),
         ))
-        return results[:max_results]
+
+        # Provider download URLs stay backend-only. Prowlarr grab URLs can carry
+        # its API key in the query string, so never serialize source_url/magnet
+        # into a response consumed by Electron/React.
+        serialized: list[dict] = []
+        for item in results[:max_results]:
+            source_url = str(item.get("source_url") or "").strip()
+            if not source_url:
+                continue
+            release_ref = ReleaseReferenceStore.issue(source_url, _known_info_hash(item) or None)
+            safe_item = {
+                key: value
+                for key, value in item.items()
+                if key not in {"source_url", "magnet"}
+            }
+            safe_item["release_ref"] = release_ref
+            serialized.append(safe_item)
+        return serialized

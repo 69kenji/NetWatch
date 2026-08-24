@@ -1,10 +1,14 @@
+from __future__ import annotations
+
 import asyncio
 import ipaddress
 import socket
 from collections.abc import Iterable
+from dataclasses import dataclass
 from urllib.parse import ParseResult, urlparse
 
 import aiohttp
+from aiohttp.abc import AbstractResolver
 
 
 DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -24,17 +28,74 @@ def authority_key(url: str) -> tuple[str, str, int]:
     return _authority_key(urlparse(str(url or "").strip()))
 
 
-async def validate_public_http_url(
+@dataclass(frozen=True)
+class ResolvedHttpTarget:
+    url: str
+    scheme: str
+    hostname: str
+    port: int
+    addresses: tuple[str, ...]
+
+
+class PinnedResolver(AbstractResolver):
+    """aiohttp resolver that can return only addresses validated beforehand.
+
+    The request URL still contains the original hostname, so HTTP Host and HTTPS
+    SNI/certificate validation retain normal hostname semantics while the TCP
+    connection is pinned to the DNS answer that passed the SSRF policy.
+    """
+
+    def __init__(self, hostname: str, addresses: Iterable[str]):
+        self._hostname = hostname.lower().rstrip(".")
+        self._addresses = tuple(dict.fromkeys(str(address) for address in addresses))
+        if not self._addresses:
+            raise ValueError("Pinned resolver requires at least one address")
+
+    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET) -> list[dict]:
+        if host.lower().rstrip(".") != self._hostname:
+            raise OSError("Pinned resolver refused an unexpected hostname")
+        rows: list[dict] = []
+        for address in self._addresses:
+            ip = ipaddress.ip_address(address)
+            address_family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+            if family not in {socket.AF_UNSPEC, 0, address_family}:
+                continue
+            rows.append({
+                "hostname": host,
+                "host": address,
+                "port": port,
+                "family": address_family,
+                "proto": socket.IPPROTO_TCP,
+                "flags": socket.AI_NUMERICHOST,
+            })
+        if not rows:
+            raise OSError("Pinned resolver has no address for the requested family")
+        return rows
+
+    async def close(self) -> None:
+        return None
+
+
+def pinned_connector(target: ResolvedHttpTarget) -> aiohttp.TCPConnector:
+    """Return a connector that cannot perform a second unrestricted DNS lookup."""
+    return aiohttp.TCPConnector(
+        resolver=PinnedResolver(target.hostname, target.addresses),
+        use_dns_cache=False,
+    )
+
+
+async def resolve_public_http_target(
     url: str,
     *,
     require_https: bool = False,
     allowed_private_authorities: Iterable[tuple[str, str, int]] = (),
-) -> str:
-    """Reject HTTP(S) targets that resolve to non-public network addresses.
+) -> ResolvedHttpTarget:
+    """Validate an HTTP(S) target and return the exact addresses that passed.
 
-    A small explicit authority allowlist is supported for Docker-internal services
-    such as Prowlarr. Everything else must resolve only to globally routable IPs.
-    Validation is repeated by callers before each redirect hop.
+    Callers making requests to untrusted/provider-supplied URLs should use the
+    returned addresses with :func:`pinned_connector`. Merely validating and then
+    allowing the HTTP library to resolve the hostname again creates a DNS-rebind
+    time-of-check/time-of-use gap.
     """
     candidate = str(url or "").strip()
     parsed = urlparse(candidate)
@@ -46,12 +107,10 @@ async def validate_public_http_url(
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("URL user information is not allowed")
 
-    key = _authority_key(parsed)
+    scheme, hostname, port = _authority_key(parsed)
+    key = (scheme, hostname, port)
     allowed = set(allowed_private_authorities)
-    if key in allowed:
-        return candidate
 
-    _scheme, hostname, port = key
     addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
     try:
         addresses.add(ipaddress.ip_address(hostname))
@@ -78,10 +137,28 @@ async def validate_public_http_url(
     if not addresses:
         raise ValueError(f"Could not resolve download host: {hostname}")
 
-    if any(not address.is_global for address in addresses):
+    if key not in allowed and any(not address.is_global for address in addresses):
         raise ValueError("Download URL resolves to a non-public network address")
 
-    return candidate
+    # Stable ordering keeps tests/logging deterministic while preserving all
+    # acceptable A/AAAA answers for normal multi-address hosts.
+    rendered = tuple(sorted(str(address) for address in addresses))
+    return ResolvedHttpTarget(candidate, scheme, hostname, port, rendered)
+
+
+async def validate_public_http_url(
+    url: str,
+    *,
+    require_https: bool = False,
+    allowed_private_authorities: Iterable[tuple[str, str, int]] = (),
+) -> str:
+    """Compatibility validator for callers that do not make a later connection."""
+    target = await resolve_public_http_target(
+        url,
+        require_https=require_https,
+        allowed_private_authorities=allowed_private_authorities,
+    )
+    return target.url
 
 
 async def read_response_limited(response: aiohttp.ClientResponse, max_bytes: int) -> bytes:

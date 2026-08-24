@@ -90,8 +90,8 @@ class TorrentEngine:
     """Single-process libtorrent owner for NetWatch.
 
     The FastAPI wrapper is intentionally thin. All torrent handles live here, in
-    the VPN network namespace, while the main NetWatch backend remains outside
-    the VPN and accesses this engine over Docker's private bridge.
+    the shared VPN network namespace. The main NetWatch backend shares that
+    namespace and reaches this engine over loopback only.
     """
 
     def __init__(self) -> None:
@@ -178,6 +178,7 @@ class TorrentEngine:
             try:
                 value = value() if callable(value) else value
             except Exception:
+                logger.debug("Ignored optional libtorrent binding failure", exc_info=True)
                 continue
             rendered = str(value).strip()
             if rendered:
@@ -195,6 +196,7 @@ class TorrentEngine:
                 value = value() if callable(value) else value
                 rendered = str(value).strip().lower() if value is not None else ""
             except Exception:
+                logger.debug("Ignored optional libtorrent binding failure", exc_info=True)
                 continue
             if len(rendered) == width and set(rendered) != {"0"}:
                 normalized = cls._valid_hash(rendered)
@@ -208,7 +210,7 @@ class TorrentEngine:
         try:
             candidates.extend(cls._hash_candidates(getattr(params, "info_hashes", None)))
         except Exception:
-            pass
+            logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
         try:
             info = getattr(params, "ti", None)
             if info is not None:
@@ -219,9 +221,9 @@ class TorrentEngine:
                     if normalized and normalized not in candidates:
                         candidates.insert(0, normalized)
                 except Exception:
-                    pass
+                    logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
         except Exception:
-            pass
+            logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
         return list(dict.fromkeys(candidates))
 
     @staticmethod
@@ -240,14 +242,14 @@ class TorrentEngine:
         try:
             candidates.extend(cls._hash_candidates(handle.info_hashes()))
         except Exception:
-            pass
+            logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
         try:
             rendered = str(handle.info_hash()).strip().lower()
             normalized = cls._valid_hash(rendered)
             if normalized and normalized not in candidates:
                 candidates.insert(0, normalized)
         except Exception:
-            pass
+            logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
         if candidates:
             return candidates[0]
         raise TorrentEngineError("libtorrent did not expose a usable info hash")
@@ -266,18 +268,18 @@ class TorrentEngine:
         try:
             params.flags &= ~lt.torrent_flags.auto_managed
         except Exception:
-            pass
+            logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
         try:
             params.flags &= ~lt.torrent_flags.paused
         except Exception:
-            pass
+            logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
         # Added in libtorrent 2.0.8. It prevents arbitrary payload pieces from
         # downloading while a magnet is still acquiring metadata. Once the video
         # file is identified we explicitly enable only that file.
         try:
             params.flags |= lt.torrent_flags.default_dont_download
         except Exception:
-            pass
+            logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
 
     def _finish_add(
         self,
@@ -312,7 +314,7 @@ class TorrentEngine:
             try:
                 params.upload_limit = UPLOAD_LIMIT
             except Exception:
-                pass
+                logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
             self._set_add_flags(params)
 
             try:
@@ -320,7 +322,7 @@ class TorrentEngine:
                 try:
                     handle.unset_flags(lt.torrent_flags.auto_managed)
                 except Exception:
-                    pass
+                    logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
                 handle.resume()
                 handle.set_upload_limit(UPLOAD_LIMIT)
                 actual_hash = self._hash_from_handle(handle)
@@ -332,7 +334,7 @@ class TorrentEngine:
             try:
                 handle_candidates.extend(self._hash_candidates(handle.info_hashes()))
             except Exception:
-                pass
+                logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
             if requested_hash not in handle_candidates and requested_hash != actual_hash:
                 try:
                     self._session.remove_torrent(handle)
@@ -406,6 +408,7 @@ class TorrentEngine:
         try:
             value = int(status.state)
         except Exception:
+            logger.debug("Could not coerce libtorrent state enum to int", exc_info=True)
             rendered = str(status.state).split(".")[-1]
             aliases = {
                 "checking_files": "checkingDL",
@@ -441,6 +444,7 @@ class TorrentEngine:
             try:
                 listening = bool(self._session.is_listening())
             except Exception:
+                logger.debug("Could not query libtorrent listener state", exc_info=True)
                 listening = False
             return {
                 "service": "torrent-engine",
@@ -515,7 +519,7 @@ class TorrentEngine:
             if hasattr(info, "is_loaded") and not info.is_loaded():
                 return None
         except Exception:
-            pass
+            logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
         return info
 
     @staticmethod
@@ -554,10 +558,12 @@ class TorrentEngine:
             try:
                 progress_values = list(record.handle.file_progress())
             except Exception:
+                logger.debug("Could not read libtorrent file progress", exc_info=True)
                 progress_values = []
             try:
                 priorities = list(record.handle.get_file_priorities())
             except Exception:
+                logger.debug("Could not read libtorrent file priorities", exc_info=True)
                 priorities = []
 
             files: list[dict[str, Any]] = []
@@ -569,6 +575,7 @@ class TorrentEngine:
                 try:
                     priority = int(priorities[index]) if index < len(priorities) else 0
                 except Exception:
+                    logger.debug("Could not coerce libtorrent file priority", exc_info=True)
                     priority = 0
                 files.append(
                     {
@@ -625,7 +632,8 @@ class TorrentEngine:
                 }
 
             info = self._torrent_info(record.handle)
-            assert info is not None
+            if info is None:
+                raise TorrentEngineError("torrent metadata unexpectedly unavailable during prepare")
             storage = self._file_storage(info)
             index = int(selected["index"])
             if not record.prepared or record.selected_file_index != index:
@@ -641,7 +649,7 @@ class TorrentEngine:
                 try:
                     record.handle.clear_piece_deadlines()
                 except Exception:
-                    pass
+                    logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
                 logger.info("Selected file %s for %s", selected["name"], info_hash)
 
             selected["priority"] = 7
@@ -737,7 +745,7 @@ class TorrentEngine:
                     try:
                         record.handle.clear_piece_deadlines()
                     except Exception:
-                        pass
+                        logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
                     record.deadline_window = None
                     record.pending_far_window = None
                     if request_generation is not None:
@@ -778,7 +786,7 @@ class TorrentEngine:
             try:
                 record.handle.piece_priority(piece, 7)
             except Exception:
-                pass
+                logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
 
         if record.deadline_window is None:
             record.deadline_window = (first_piece, window_last)
@@ -928,7 +936,7 @@ class TorrentEngine:
             try:
                 record.handle.force_dht_announce()
             except Exception:
-                pass
+                logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
 
     @staticmethod
     def _delete_files_flag():
@@ -951,11 +959,11 @@ class TorrentEngine:
             try:
                 record.handle.pause()
             except Exception:
-                pass
+                logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
             try:
                 record.handle.clear_piece_deadlines()
             except Exception:
-                pass
+                logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
             try:
                 delete_flag = self._delete_files_flag() if delete_files else None
                 if delete_flag is not None:
@@ -993,4 +1001,4 @@ class TorrentEngine:
         try:
             self._session.pause()
         except Exception:
-            pass
+            logger.debug("Ignored optional libtorrent operation failure", exc_info=True)

@@ -13,6 +13,7 @@ import aiohttp
 from config import settings
 from services.catalog_policy import is_explicit_content, is_indian_production, recent_origin_allowed, recent_score
 from services.exceptions import DependencyUnavailableError
+from services.net_safety import read_response_limited
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 TMDB_IMAGE = "https://image.tmdb.org/t/p"
@@ -208,7 +209,12 @@ class MetadataService:
                             length_value = 0
                         if length_value > 15 * 1024 * 1024:
                             raise DependencyUnavailableError("tmdb-image", "TMDB image exceeds the size limit")
-                    body = await response.read()
+                    try:
+                        body = await read_response_limited(response, 15 * 1024 * 1024)
+                    except ValueError as exc:
+                        raise DependencyUnavailableError(
+                            "tmdb-image", "TMDB image exceeds the size limit"
+                        ) from exc
         except (DependencyUnavailableError, ValueError):
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -1064,14 +1070,6 @@ class MetadataService:
             },
         )
         return cls._format_episode(data)
-
-    @classmethod
-    async def trending_movies(cls) -> list[dict]:
-        data = await cls._get("/trending/movie/week", {"language": "en-US"})
-        raw = await cls._filter_explicit_raw([
-            ("movie", item) for item in data.get("results", []) if isinstance(item, dict)
-        ])
-        return [cls._format_movie_result(item) for _, item in raw]
 
     @staticmethod
     def _looks_like_anime(item: dict, media_type: str) -> bool:

@@ -29,6 +29,8 @@ interface NativePlayerState {
   cacheDuration: number
   cacheBufferingState: number
   pausedForCache: boolean
+  seeking: boolean
+  seekBuffering: boolean
   cacheSpeed: number
   voConfigured: boolean
   hwdecCurrent?: string | null
@@ -156,7 +158,7 @@ interface Window {
     }
     player: {
       openTorrent: (request: {
-        torrentSource: string
+        releaseRef: string
         title?: string | null
         mediaName?: string | null
         expectedHash?: string | null

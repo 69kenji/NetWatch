@@ -192,7 +192,7 @@ def main() -> int:
                 "POST",
                 "/api/torrents/add",
                 {
-                    "magnet": candidate["source_url"],
+                    "release_ref": candidate["release_ref"],
                     "media_name": candidate["title"],
                     "expected_hash": candidate.get("info_hash"),
                 },

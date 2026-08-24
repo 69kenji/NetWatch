@@ -7,7 +7,7 @@ import aiohttp
 
 from config import settings
 from services.exceptions import DependencyUnavailableError
-from services.net_safety import authority_key, read_response_limited, validate_public_http_url
+from services.net_safety import authority_key, pinned_connector, read_response_limited, resolve_public_http_target
 
 # Resolution extraction from torrent title
 RESOLUTION_PATTERNS = {
@@ -49,7 +49,7 @@ def parse_title(title: str) -> dict:
     return {"resolution": resolution, "codec": codec, "source": source, "audio": audio}
 
 
-MAX_TORRENT_SOURCE_BYTES = 64 * 1024 * 1024
+MAX_TORRENT_SOURCE_BYTES = 16 * 1024 * 1024
 MAX_ERROR_BODY_BYTES = 4 * 1024
 
 
@@ -207,9 +207,8 @@ class ProwlarrService:
             info_hash = (item.get("infoHash") or "").strip().lower() or None
             results.append({
                 "title": title,
-                # Keep `magnet` for the current frontend contract while also exposing
-                # what the source actually is for lifecycle tests.
-                "magnet": source_url,
+                # This raw provider URL is internal-only. ReleaseSearchService
+                # replaces it with an opaque reference before API serialization.
                 "source_url": source_url,
                 "source_type": source_type,
                 "info_hash": info_hash,
@@ -275,28 +274,33 @@ class ProwlarrService:
 
         timeout = aiohttp.ClientTimeout(total=max(settings.DEPENDENCY_TIMEOUT_SECS, 30.0))
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                current_url = url
-                for _ in range(6):
-                    if current_url.lower().startswith("magnet:?"):
-                        return {"source_type": "magnet", "magnet": current_url}
+            current_url = url
+            for _ in range(6):
+                if current_url.lower().startswith("magnet:?"):
+                    return {"source_type": "magnet", "magnet": current_url}
 
-                    parsed_current = urlparse(current_url)
-                    if parsed_current.scheme not in {"http", "https"}:
-                        raise DependencyUnavailableError(
-                            "prowlarr",
-                            f"torrent download redirected to unsupported URI scheme: {parsed_current.scheme or 'none'}",
-                        )
-                    try:
-                        await validate_public_http_url(
-                            current_url,
-                            allowed_private_authorities={prowlarr_authority},
-                        )
-                    except ValueError as exc:
-                        raise DependencyUnavailableError(
-                            "prowlarr", f"Unsafe torrent download URL: {exc}"
-                        ) from exc
+                parsed_current = urlparse(current_url)
+                if parsed_current.scheme not in {"http", "https"}:
+                    raise DependencyUnavailableError(
+                        "prowlarr",
+                        f"torrent download redirected to unsupported URI scheme: {parsed_current.scheme or 'none'}",
+                    )
+                try:
+                    target = await resolve_public_http_target(
+                        current_url,
+                        allowed_private_authorities={prowlarr_authority},
+                    )
+                except ValueError as exc:
+                    raise DependencyUnavailableError(
+                        "prowlarr", f"Unsafe torrent download URL: {exc}"
+                    ) from exc
 
+                # A fresh pinned connector is created for each redirect hop. The
+                # request hostname is preserved for Host/SNI, but aiohttp can only
+                # connect to the addresses that were just validated above.
+                async with aiohttp.ClientSession(
+                    timeout=timeout, connector=pinned_connector(target)
+                ) as session:
                     async with session.get(
                         current_url,
                         headers=headers_for(current_url),
@@ -346,21 +350,10 @@ class ProwlarrService:
                                 "prowlarr", "download URL did not return a magnet URI or bencoded .torrent file"
                             )
                         return {"source_type": "torrent_file", "torrent_bytes": payload}
-                raise DependencyUnavailableError(
-                    "prowlarr", "torrent download exceeded redirect limit"
-                )
+            raise DependencyUnavailableError(
+                "prowlarr", "torrent download exceeded redirect limit"
+            )
         except DependencyUnavailableError:
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise DependencyUnavailableError("prowlarr", str(exc)) from exc
-
-    @classmethod
-    async def fetch_torrent(cls, source_url: str) -> bytes:
-        """Backward-compatible helper for callers that specifically require .torrent bytes."""
-        resolved = await cls.resolve_torrent_source(source_url)
-        if resolved["source_type"] != "torrent_file":
-            raise DependencyUnavailableError(
-                "prowlarr", "download URL resolved to a magnet URI instead of a .torrent file"
-            )
-        return resolved["torrent_bytes"]
-

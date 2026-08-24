@@ -14,7 +14,7 @@ from urllib.parse import urljoin, urlparse
 import aiohttp
 
 from config import settings
-from services.net_safety import read_response_limited, validate_public_http_url
+from services.net_safety import pinned_connector, read_response_limited, resolve_public_http_target
 
 OPENSUBTITLES_BASE = "https://api.opensubtitles.com/api/v1"
 SUBDL_BASE = "https://api.subdl.com/api/v2"
@@ -31,7 +31,9 @@ CONTENT_TYPES = {
 }
 CACHE_TTL_SECONDS = 6 * 60 * 60
 CACHE_MAX_ENTRIES = 24
+CACHE_MAX_BYTES = 64 * 1024 * 1024
 MAX_SUBTITLE_BYTES = 8 * 1024 * 1024
+MAX_HEALTH_RESPONSE_BYTES = 1024 * 1024
 
 
 class SubtitleProviderError(RuntimeError):
@@ -162,10 +164,10 @@ class SubtitleService:
                     if response.status != 200:
                         result.update(status="unavailable", error=f"search validation returned HTTP {response.status}")
                         return result
-                    await response.read()
+                    await read_response_limited(response, MAX_HEALTH_RESPONSE_BYTES)
                     result.update(status="ok", connected=True, authenticated=True)
                     return result
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             result.update(status="unavailable", error=str(exc))
             return result
 
@@ -664,19 +666,20 @@ class SubtitleService:
                     if not download_url:
                         raise SubtitleProviderError("opensubtitles", "Download response did not include a link")
 
-            async with aiohttp.ClientSession(
-                timeout=cls._timeout(30),
-                headers={"User-Agent": USER_AGENT},
-            ) as download_session:
-                current_url = str(download_url)
-                for _ in range(6):
-                    try:
-                        await validate_public_http_url(current_url, require_https=True)
-                    except ValueError as exc:
-                        raise SubtitleProviderError(
-                            "opensubtitles", f"Unsafe subtitle download URL: {exc}"
-                        ) from exc
+            current_url = str(download_url)
+            for _ in range(6):
+                try:
+                    target = await resolve_public_http_target(current_url, require_https=True)
+                except ValueError as exc:
+                    raise SubtitleProviderError(
+                        "opensubtitles", f"Unsafe subtitle download URL: {exc}"
+                    ) from exc
 
+                async with aiohttp.ClientSession(
+                    timeout=cls._timeout(30),
+                    headers={"User-Agent": USER_AGENT},
+                    connector=pinned_connector(target),
+                ) as download_session:
                     async with download_session.get(current_url, allow_redirects=False) as response:
                         if response.status in {301, 302, 303, 307, 308}:
                             location = response.headers.get("Location")
@@ -700,10 +703,10 @@ class SubtitleService:
                                 "opensubtitles", "Downloaded subtitle exceeds the size limit"
                             ) from exc
                         break
-                else:
-                    raise SubtitleProviderError(
-                        "opensubtitles", "Subtitle download exceeded redirect limit"
-                    )
+            else:
+                raise SubtitleProviderError(
+                    "opensubtitles", "Subtitle download exceeded redirect limit"
+                )
         except SubtitleProviderError:
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
@@ -753,13 +756,13 @@ class SubtitleService:
                                 f"subtitle download returned HTTP {response.status}",
                                 response.status,
                             )
-                        content = await response.read()
+                        content = await read_response_limited(response, MAX_SUBTITLE_BYTES)
                         disposition = response.headers.get("Content-Disposition", "")
                         match = re.search(r'filename\*?=(?:UTF-8\'\')?["\']?([^"\';]+)', disposition, re.I)
                         remote_name = match.group(1).strip() if match else PurePosixPath(provider_path).name
             except SubtitleProviderError:
                 raise
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
                 raise SubtitleProviderError("subdl", str(exc)) from exc
 
             if not content:
@@ -769,7 +772,7 @@ class SubtitleService:
             return content, remote_name
 
         # If a result only exposes its nId, resolve it through the authenticated
-        # exposes its nId, resolve it through the authenticated v2 download API.
+        # v2 download API.
         if str(download_ref or "").startswith("subdl-v2:"):
             n_id = str(download_ref).split(":", 1)[1].strip()
             if not n_id:
@@ -802,7 +805,7 @@ class SubtitleService:
                                 raise SubtitleProviderError("subdl", "v2 download response did not include a file URL")
                             download_ref = urljoin(f"{SUBDL_DOWNLOAD_BASE}/", str(resolved))
                         else:
-                            content = await response.read()
+                            content = await read_response_limited(response, MAX_SUBTITLE_BYTES)
                             disposition = response.headers.get("Content-Disposition", "")
                             match = re.search(r'filename\*?=(?:UTF-8\'\')?["\']?([^"\';]+)', disposition, re.I)
                             remote_name = match.group(1).strip() if match else f"{n_id}.srt"
@@ -835,13 +838,13 @@ class SubtitleService:
                             f"subtitle download returned HTTP {response.status}",
                             response.status,
                         )
-                    content = await response.read()
+                    content = await read_response_limited(response, MAX_SUBTITLE_BYTES)
                     disposition = response.headers.get("Content-Disposition", "")
                     match = re.search(r'filename\*?=(?:UTF-8\'\')?["\']?([^"\';]+)', disposition, re.I)
                     remote_name = match.group(1).strip() if match else PurePosixPath(parsed.path).name
         except SubtitleProviderError:
             raise
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             raise SubtitleProviderError("subdl", str(exc)) from exc
 
         if not content:
@@ -900,7 +903,16 @@ class SubtitleService:
     async def _cache_put(cls, subtitle: CachedSubtitle) -> None:
         async with cls._cache_lock:
             cls._purge_cache_locked()
-            while len(cls._cache) >= CACHE_MAX_ENTRIES:
+
+            def cache_bytes() -> int:
+                return sum(len(item.content) for item in cls._cache.values())
+
+            # Bound both entry count and total bytes. The latter prevents a run
+            # of maximum-size subtitles from retaining ~200 MiB in-process.
+            while cls._cache and (
+                len(cls._cache) >= CACHE_MAX_ENTRIES
+                or cache_bytes() + len(subtitle.content) > CACHE_MAX_BYTES
+            ):
                 oldest = min(cls._cache.values(), key=lambda item: item.created_at)
                 cls._cache.pop(oldest.token, None)
             cls._cache[subtitle.token] = subtitle

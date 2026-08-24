@@ -148,7 +148,7 @@ export function TracksPanel({ mediaItem, mediaTitle, filePath, tracks = [], acti
       const { data } = await api.post('/api/subtitles/download', {
         subtitle_id: sub.id,
         source: sub.source,
-        download_ref: sub.download_ref || sub.download_url,
+        download_ref: sub.download_ref,
         format: sub.format,
         file_name: sub.file_name || undefined,
       })

@@ -155,7 +155,7 @@ FunctionEnd
 Function NetWatchExtractPrerequisiteHelper
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
-  ; 1.0.4 uses a project-owned fixed-purpose native helper. No PowerShell,
+  ; Starting with 1.0.4, NetWatch uses a project-owned fixed-purpose native helper. No PowerShell,
   ; cmd.exe, WMI scripting, or arbitrary shell command is used by the
   ; prerequisite bootstrap path.
   File /oname=netwatch-prerequisites.exe "${BUILD_RESOURCES_DIR}\netwatch-prerequisites.exe"

@@ -3,8 +3,10 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from routes import diagnostics, metadata, subtitles, torrents
+from services.http_security import BodySizeLimitMiddleware, RateLimitMiddleware
 from services.torrent_engine import TorrentEngineService
 
 logger = logging.getLogger(__name__)
@@ -28,11 +30,22 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="NetWatch API", lifespan=lifespan)
 
+# Reject DNS-rebinding Host headers before any API handler sees the request.
+# The Windows host reaches this service through the loopback-only Docker publish.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
+
+# Bound JSON request allocation and provider-quota fan-out before route parsing.
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=256 * 1024)
+app.add_middleware(RateLimitMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "app://netwatch"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Packaged Electron uses the privileged app://netwatch origin; development
+    # uses Vite. Keep the allowlist explicit so arbitrary local web content cannot
+    # read the loopback API.
+    allow_origins=["app://netwatch", "http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_methods=["GET", "POST", "DELETE", "HEAD", "OPTIONS"],
+    allow_headers=["Accept", "Content-Type", "Range"],
 )
 
 # Local-only liveness check. Never reaches the torrent engine, Prowlarr, TMDB, etc.

@@ -25,6 +25,43 @@ def destinations(container: dict) -> set[str]:
     return {mount.get("Destination", "") for mount in container.get("Mounts", [])}
 
 
+def verify_firewall_rules() -> str:
+    """Prove the exact NetWatch kill-switch/control-port rules and their order."""
+    script = r"""
+set -eu
+DOCKER_NET=$(ip -o -4 route show dev eth0 scope link | awk 'NR==1{print $1}')
+FWMARK=$(wg show wg0 fwmark)
+test -n "$DOCKER_NET"
+test -n "$FWMARK"
+test "$FWMARK" != "off"
+iptables -C OUTPUT -d "$DOCKER_NET" -j ACCEPT
+iptables -C OUTPUT ! -o wg0 -m mark ! --mark "$FWMARK" -m addrtype ! --dst-type LOCAL -j REJECT
+iptables -C INPUT -i wg0 -p tcp -m multiport --dports 8000,8081,8191,9696 -j REJECT
+FIRST_OUT=$(iptables -S OUTPUT | grep '^-A OUTPUT' | sed -n '1p')
+SECOND_OUT=$(iptables -S OUTPUT | grep '^-A OUTPUT' | sed -n '2p')
+FIRST_IN=$(iptables -S INPUT | grep '^-A INPUT' | sed -n '1p')
+case "$FIRST_OUT" in *"-d $DOCKER_NET -j ACCEPT"*) ;; *) echo "unexpected first OUTPUT rule: $FIRST_OUT"; exit 31;; esac
+case "$SECOND_OUT" in *"! -o wg0"*"-m mark ! --mark"*"-m addrtype ! --dst-type LOCAL"*"-j REJECT"*) ;; *) echo "unexpected second OUTPUT rule: $SECOND_OUT"; exit 32;; esac
+case "$FIRST_IN" in *"-i wg0"*"--dports 8000,8081,8191,9696"*"-j REJECT"*) ;; *) echo "unexpected first INPUT rule: $FIRST_IN"; exit 33;; esac
+printf '%s\n%s\n%s' "$FIRST_OUT" "$SECOND_OUT" "$FIRST_IN"
+"""
+    return sh("docker", "exec", "nw_vpn", "sh", "-lc", script)
+
+
+def process_uid(container_name: str, *, comm: str | None = None) -> str:
+    if comm is None:
+        script = "awk '/^Uid:/{print $2; exit}' /proc/1/status"
+    else:
+        safe = comm.replace("'", "")
+        script = (
+            "for p in /proc/[0-9]*; do "
+            "[ -r \"$p/comm\" ] || continue; "
+            f"[ \"$(cat \"$p/comm\" 2>/dev/null)\" = '{safe}' ] || continue; "
+            "awk '/^Uid:/{print $2; exit}' \"$p/status\"; exit; done"
+        )
+    return sh("docker", "exec", container_name, "sh", "-lc", script).strip()
+
+
 def active_nameservers(resolv_conf: str) -> list[str]:
     """Return only active nameserver directives, ignoring comments/options."""
     servers: list[str] = []
@@ -72,6 +109,25 @@ def main() -> int:
             actual,
         )
 
+    # Verify effective application UIDs rather than inferring privilege from the
+    # presence/absence of Compose `user:`. LinuxServer uses PUID/PGID and an s6
+    # supervisor; FlareSolverr sets USER in its upstream image.
+    uid_checks = [
+        ("nw_torrent_engine", "torrent engine", None, "1000"),
+        ("nw_backend", "backend", None, "1000"),
+        ("nw_prowlarr", "Prowlarr application", "Prowlarr", "1000"),
+    ]
+    if flaresolverr_running := bool(flaresolverr and flaresolverr.get("State", {}).get("Running")):
+        uid_checks.append(("nw_flaresolverr", "FlareSolverr", None, None))
+    for container_name, label, comm, expected_uid in uid_checks:
+        try:
+            uid = process_uid(container_name, comm=comm)
+            ok = bool(uid) and uid != "0" and (expected_uid is None or uid == expected_uid)
+            failures += not check(f"{label} runs non-root", ok, f"uid={uid or 'unknown'}")
+        except Exception as exc:
+            failures += 1
+            check(f"{label} runs non-root", False, str(exc))
+
     for name, cmd, needle in [
         ("wg0 exists", ["docker", "exec", "nw_vpn", "wg", "show", "wg0"], "interface:"),
         ("public IPv4 route", ["docker", "exec", "nw_vpn", "sh", "-lc", "ip route get 1.1.1.1"], "dev wg0"),
@@ -85,16 +141,15 @@ def main() -> int:
             check(name, False, str(exc))
 
     try:
-        rules = sh("docker", "exec", "nw_vpn", "sh", "-lc", "iptables -S OUTPUT")
-        ok = "-j REJECT" in rules and "--mark" in rules
+        rules = verify_firewall_rules()
         failures += not check(
-            "killswitch OUTPUT rule",
-            ok,
-            "reject rule present" if ok else rules,
+            "exact kill-switch and control-port firewall rules",
+            True,
+            rules.replace("\n", "; "),
         )
     except Exception as exc:
         failures += 1
-        check("killswitch OUTPUT rule", False, str(exc))
+        check("exact kill-switch and control-port firewall rules", False, str(exc))
 
     port_bindings = vpn.get("HostConfig", {}).get("PortBindings", {}) or {}
     expected_ports = {"8000/tcp", "9696/tcp"}

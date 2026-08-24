@@ -15,7 +15,7 @@ import type {
   TmdbSeriesDetails,
   TmdbSeriesSummary,
 } from '../types/metadata'
-import { formatBytes, sortResults, type QualityFilter, type ResultSort, type TorrentSearchResult } from '../types/torrents'
+import { assertReleaseReferences, formatBytes, sortResults, type QualityFilter, type ResultSort, type TorrentSearchResult } from '../types/torrents'
 import { BACKEND_BASE_URL } from '../utils/api'
 
 interface SeriesDetailsViewProps {
@@ -69,11 +69,13 @@ async function fetchEpisodeStreams(
   const response = await fetch(
     `${BACKEND_BASE_URL}/api/metadata/series/${seriesId}/episodes/${episode.season_number}/${episode.episode_number}/stream-options?${params}`,
   )
-  return await readJsonResponse(response) as EpisodeStreamOptions
+  const payload = await readJsonResponse(response) as EpisodeStreamOptions
+  assertReleaseReferences(payload.results)
+  return payload
 }
 
 function releaseSource(result: TorrentSearchResult) {
-  return result.source_url || result.magnet || ''
+  return result.release_ref || ''
 }
 
 function episodeCode(episode: TmdbEpisode) {

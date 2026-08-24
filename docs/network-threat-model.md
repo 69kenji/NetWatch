@@ -18,7 +18,7 @@ NetWatch 1.0.x is designed so that:
 - WireGuard failure blocks application traffic instead of falling back to Docker's normal egress.
 - DNS uses the VPN-side resolver supplied by the imported WireGuard configuration.
 - IPv6 is disabled in the VPN namespace for 1.0.x.
-- Host-facing APIs bind to `127.0.0.1` only.
+- Host-facing Docker publications bind to `127.0.0.1` only, and VPN-peer access to internal control ports is rejected by the namespace firewall.
 
 ## Non-goals
 
@@ -40,10 +40,12 @@ Windows Electron / native mpv
 +--------------------------------------------------+
 | shared nw_vpn network namespace                  |
 |                                                  |
-| backend         127.0.0.1:8000                   |
-| torrent-engine  127.0.0.1:8081                   |
-| Prowlarr        127.0.0.1:9696                   |
-| FlareSolverr    127.0.0.1:8191                   |
+| backend         namespace TCP :8000              |
+| torrent-engine  namespace TCP :8081              |
+| Prowlarr        namespace TCP :9696              |
+| FlareSolverr    namespace TCP :8191              |
+|                                                  |
+| INPUT from wg0 -> control ports -> REJECT        |
 |                                                  |
 | ordinary traffic -> wg0 -> encrypted WG -> eth0 |
 +--------------------------------------------------+
@@ -65,6 +67,16 @@ network_mode: service:vpn
 
 They therefore do not receive independent Docker default routes.
 
+The backend and torrent-engine Uvicorn processes deliberately listen on all IPv4
+interfaces **inside this shared namespace**. Docker's Windows-to-container port
+publication is DNATed to the namespace's Docker interface, so changing those
+listeners to `127.0.0.1` would make the published host ports unreachable. The
+listener address is therefore not used as the remote-access boundary. Instead,
+NetWatch publishes only required host ports on Windows loopback and installs an
+`INPUT -i wg0` firewall rule rejecting TCP access to control ports
+`8000,8081,8191,9696` from WireGuard peers. The runtime verifier checks that exact
+rule and its ordering.
+
 ## Trust boundaries
 
 ### Windows desktop
@@ -77,7 +89,7 @@ First-run credential entry uses separate sandboxed Electron windows with narrow 
 
 ### Installer prerequisite bootstrap
 
-The normal-runtime egress invariant begins after WSL/Docker prerequisites exist. The Windows NSIS bootstrap is a separate trust phase: with explicit user approval it may invoke Microsoft `wsl.exe`/Windows servicing and may download Docker Desktop directly from Docker's pinned `desktop.docker.com` HTTPS endpoint before the inner VPN runtime exists. NetWatch 1.0.4 performs these actions through a fixed-purpose native helper rather than PowerShell. The Docker download is size/redirect bounded and the installer must pass Windows Authenticode validation with a Docker Inc. signer identity before execution.
+The normal-runtime egress invariant begins after WSL/Docker prerequisites exist. The Windows NSIS bootstrap is a separate trust phase: with explicit user approval it may invoke Microsoft `wsl.exe`/Windows servicing and may download Docker Desktop directly from Docker's pinned `desktop.docker.com` HTTPS endpoint before the inner VPN runtime exists. NetWatch performs these actions through a fixed-purpose native helper rather than PowerShell. The Docker download is size/redirect bounded and the installer must pass Windows Authenticode validation with a Docker Inc. signer identity before execution.
 
 This bootstrap exception does not authorize the installed Electron application, mpv, backend, torrent engine, Prowlarr, or FlareSolverr to bypass the inner VPN during normal operation.
 
@@ -88,6 +100,15 @@ NetWatch relies on Windows, WSL2, and Docker Desktop to enforce process, namespa
 ### Inner VPN namespace
 
 `nw_vpn` is the authoritative egress boundary. The VPN container retains the network administration capability required to configure WireGuard and firewall/routing policy; application containers do not receive independent egress networks.
+
+NetWatch-owned backend and torrent-engine processes run as UID 1000 with all Linux
+capabilities dropped and `no-new-privileges`. Prowlarr and FlareSolverr are
+third-party images whose startup models are controlled upstream, so NetWatch does
+not force a Compose `user:` override that could break their initialization.
+Instead, `docker/verify-networking.py` checks the **effective application process
+UIDs at runtime** and fails verification if those application processes are root.
+This is a runtime assertion, not a claim that every supervisor/init process inside
+third-party images is non-root.
 
 ### VPN profile metadata
 
@@ -175,7 +196,7 @@ These results describe the tested 1.0.x architecture, not every possible future 
 Changes to the following require a new security review and network verification:
 
 - `network_mode: service:vpn` for Internet-facing NetWatch services;
-- loopback-only host publishing;
+- loopback-only host publishing and the `wg0` control-port INPUT rejection rule;
 - WireGuard policy routing and kill-switch behavior;
 - VPN-routed DNS without an unprotected fallback;
 - IPv6-disable behavior unless equivalent protected IPv6 routing is implemented;

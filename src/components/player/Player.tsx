@@ -80,6 +80,8 @@ function defaultNativeState(error: string | null = null): NativePlayerState {
     cacheDuration: 0,
     cacheBufferingState: 0,
     pausedForCache: false,
+    seeking: false,
+    seekBuffering: false,
     cacheSpeed: 0,
     voConfigured: false,
     hwdecCurrent: null,
@@ -218,7 +220,18 @@ export function Player() {
     session?.source &&
     !videoReady
   )
-  const rebuffering = Boolean(!preparing && !waitingForVideo && preparation?.stage === 'ready' && nativeState?.pausedForCache)
+  const seekRestartBuffering = Boolean(
+    nativeState?.seekBuffering || (
+      nativeState?.seeking &&
+      ((Number(nativeState.cacheBufferingState) || 0) < 100 || (Number(nativeState.cacheDuration) || 0) < 0.5)
+    )
+  )
+  const rebuffering = Boolean(
+    !preparing &&
+    !waitingForVideo &&
+    preparation?.stage === 'ready' &&
+    (nativeState?.pausedForCache || seekRestartBuffering)
+  )
   const bufferOverlayActive = preparing || waitingForVideo || rebuffering
 
   const menuOpen = tracksPanelOpen || networkPanelOpen

@@ -81,7 +81,6 @@ def main() -> int:
     leaked = [
         row for row in results
         if "api_key=" in str(row.get("download_ref") or "").lower()
-        or "api_key=" in str(row.get("download_url") or "").lower()
     ]
     if leaked:
         print("FAIL: subtitle search response leaked a provider API key in a download reference")

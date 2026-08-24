@@ -88,3 +88,14 @@ test('volume popover centering is independent of motion transforms', () => {
   assert.match(popover, /translate: -50% 0/)
   assert.doesNotMatch(popover, /transform: translateX\(-50%\)/)
 })
+
+test('long seek restart state activates the cinematic buffering overlay', () => {
+  const controller = fs.readFileSync(path.join(root, 'electron/mpv-controller.js'), 'utf8')
+  assert.match(controller, /'seeking'/)
+  assert.match(controller, /seekOutsideBufferedWindow/)
+  assert.match(controller, /seekBuffering: true/)
+  assert.match(controller, /message\.event === 'playback-restart'/)
+  assert.match(player, /nativeState\?\.seekBuffering/)
+  assert.match(player, /nativeState\?\.seeking/)
+  assert.match(player, /nativeState\?\.pausedForCache \|\| seekRestartBuffering/)
+})

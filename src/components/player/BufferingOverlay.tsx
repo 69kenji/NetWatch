@@ -48,8 +48,12 @@ export function BufferingOverlay({ title, mediaItem, preparation, nativeState, r
 
   const startupBuffering = preparation?.stage === 'buffering' && (preparation.bufferTargetBytes || 0) > 0
   const starting = preparation?.stage === 'starting' || waitingForVideo
-  const hasProgress = rebuffering || startupBuffering || starting
-  const progressPercent = rebuffering
+  // During an out-of-cache seek mpv can be in `seeking` before it enters
+  // paused-for-cache. Pulse the brand during that restart phase rather than
+  // presenting a stale 100% cache meter from the pre-seek range.
+  const cacheProgressAvailable = Boolean(rebuffering && nativeState?.pausedForCache)
+  const hasProgress = cacheProgressAvailable || startupBuffering || starting
+  const progressPercent = cacheProgressAvailable
     ? Math.max(0, Math.min(100, Number(nativeState?.cacheBufferingState) || 0))
     : starting
       ? 100
@@ -63,7 +67,9 @@ export function BufferingOverlay({ title, mediaItem, preparation, nativeState, r
   const state = rebuffering ? 'Buffering' : waitingForVideo ? 'Starting video' : stageLabel(preparation?.stage)
 
   const bufferLabel = rebuffering
-    ? `${Math.max(0, Number(nativeState?.cacheDuration) || 0).toFixed(1)} s · ${Math.round(progressPercent || 0)}%`
+    ? cacheProgressAvailable
+      ? `${Math.max(0, Number(nativeState?.cacheDuration) || 0).toFixed(1)} s · ${Math.round(progressPercent || 0)}%`
+      : 'Seeking to requested position…'
     : (preparation?.bufferTargetBytes || 0) > 0
       ? `${formatBytes(preparation?.bufferedBytes || 0)} / ${formatBytes(preparation?.bufferTargetBytes || 0)}`
       : progressPercent != null

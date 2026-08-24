@@ -23,7 +23,6 @@ export interface Subtitle {
   language: string
   name: string
   download_ref: string
-  download_url?: string
   source: 'opensubtitles' | 'subdl' | string
   format: string
   rating?: number

@@ -34,7 +34,7 @@ function runtimeLabel(minutes?: number | null) {
 }
 
 function releaseSource(result: TorrentSearchResult) {
-  return result.source_url || result.magnet || ''
+  return result.release_ref || ''
 }
 
 export function MovieDetailsView({

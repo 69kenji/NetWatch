@@ -37,10 +37,39 @@ var (
 	procIsProcessorFeaturePresent = kernel32Win.NewProc("IsProcessorFeaturePresent")
 	procGetDiskFreeSpaceExW       = kernel32Win.NewProc("GetDiskFreeSpaceExW")
 	procGetTickCount64            = kernel32Win.NewProc("GetTickCount64")
+	procGetFileAttributesW        = kernel32Win.NewProc("GetFileAttributesW")
 
 	shell32           = syscall.NewLazyDLL("shell32.dll")
 	procIsUserAnAdmin = shell32.NewProc("IsUserAnAdmin")
 )
+
+const (
+	fileAttributeReparsePoint = 0x00000400
+	invalidFileAttributes     = 0xffffffff
+)
+
+func pathHasReparsePoint(path string) bool {
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return true
+	}
+	for {
+		ptr, err := syscall.UTF16PtrFromString(clean)
+		if err != nil {
+			return true
+		}
+		attrs, _, _ := procGetFileAttributesW.Call(uintptr(unsafe.Pointer(ptr)))
+		if uint32(attrs) != invalidFileAttributes && uint32(attrs)&fileAttributeReparsePoint != 0 {
+			return true
+		}
+		parent := filepath.Dir(clean)
+		if parent == clean {
+			break
+		}
+		clean = parent
+	}
+	return false
+}
 
 type regKey uintptr
 

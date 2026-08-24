@@ -12,4 +12,6 @@ Security properties:
 - Docker installer execution requires a trusted Authenticode signature whose signer organization is Docker Inc.;
 - only the explicit WSL servicing action is launched through Windows UAC by NSIS;
 - Ubuntu first-run account creation remains interactive and NetWatch never creates or stores Linux credentials;
-- state files include a heartbeat so NSIS can detect a helper that was terminated by endpoint security or another process.
+- state files include a heartbeat so NSIS can detect a helper that was terminated by endpoint security or another process;
+- state paths reject Windows reparse points before writes;
+- release packaging requires the helper and installer to have valid Authenticode signatures from the same certificate (unsigned builds require an explicit development-only override).

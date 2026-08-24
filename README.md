@@ -83,7 +83,7 @@ You will need:
 - TMDB, OpenSubtitles, and SubDL API keys.
 - Prowlarr with at least one usable indexer and its API key.
 
-The Windows installer can guide you through installing or enabling WSL, Ubuntu, and Docker Desktop when needed. Launch Setup normally; do not use **Run as administrator**. NetWatch 1.0.4 uses a fixed-purpose native prerequisite helper rather than PowerShell for these setup actions. Only the explicit WSL feature/package action requests UAC; Ubuntu and Docker remain current-user steps.
+The Windows installer can guide you through installing or enabling WSL, Ubuntu, and Docker Desktop when needed. Launch Setup normally; do not use **Run as administrator**. NetWatch 1.0.5 uses a fixed-purpose native prerequisite helper rather than PowerShell for these setup actions. Only the explicit WSL feature/package action requests UAC; Ubuntu and Docker remain current-user steps.
 
 If endpoint security interrupts prerequisite setup, NetWatch stops waiting when the helper heartbeat disappears and reports the interruption instead of treating a partial install as ready. Allow any trusted Microsoft/Ubuntu/Docker setup process already running to finish, then use **Refresh checks** or the official manual setup links. Do not globally allow-list `powershell.exe` or disable endpoint protection just for NetWatch.
 
@@ -132,6 +132,10 @@ Packaged state lives under:
 
 `config/` and `data/` are preserved across normal reinstall/upgrade and are not removed by a normal NetWatch uninstall. Torrent playback data is ephemeral.
 
+### Upgrading from 1.0.4 to 1.0.5
+
+The 1.0.5 networking hardening changes NetWatch's canonical WireGuard firewall hooks. On the first 1.0.5 start, an existing 1.0.4-managed `wg0.conf` may therefore be rejected and setup may ask you to import your VPN provider's WireGuard `.conf` again. This is an intentional one-time refresh of the managed WireGuard configuration; existing TMDB, OpenSubtitles, SubDL, Prowlarr, and other saved setup credentials are preserved. Re-import the original provider configuration rather than manually copying the old NetWatch-managed `wg0.conf`.
+
 ## Player process model
 
 NetWatch 1.0.3+ launches bundled `mpv.exe` directly from Electron with Node's shell-free `child_process.spawn` path. A small project-owned `netwatch-surface-helper.exe` only locates, shows, and resizes mpv's existing embedded child window. It cannot launch processes and performs no network access. Normal playback does not invoke PowerShell, WMI scripting, `Add-Type`, or `csc.exe`.
@@ -170,7 +174,7 @@ npm run package:win
 The release artifact is written as:
 
 ```text
-release\NetWatch-Setup-1.0.4.exe
+release\NetWatch-Setup-1.0.5.exe
 ```
 
 Use `npm ci` for reproducible builds. Do not replace it with `npm install` and do not use `npm audit fix --force`.

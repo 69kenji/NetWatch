@@ -41,18 +41,22 @@ SETUP_EVENTS = {
     "SETUP_COMPLETE",
 }
 
+NETWATCH_CONTROL_PORTS = "8000,8081,8191,9696"
 NETWATCH_POST_UP = (
-    "DOCKER_NET=$(ip -o -4 addr show dev eth0 | awk '{print $4}'); "
+    "DOCKER_NET=$(ip -o -4 route show dev eth0 scope link | awk 'NR==1{print $1}'); "
     "iptables -I OUTPUT 1 -d \"$DOCKER_NET\" -j ACCEPT; "
     "iptables -I OUTPUT 2 ! -o %i -m mark ! --mark $(wg show %i fwmark) "
-    "-m addrtype ! --dst-type LOCAL -j REJECT"
+    "-m addrtype ! --dst-type LOCAL -j REJECT; "
+    f"iptables -I INPUT 1 -i %i -p tcp -m multiport --dports {NETWATCH_CONTROL_PORTS} -j REJECT"
 )
 NETWATCH_PRE_DOWN = (
-    "DOCKER_NET=$(ip -o -4 addr show dev eth0 | awk '{print $4}'); "
+    "DOCKER_NET=$(ip -o -4 route show dev eth0 scope link | awk 'NR==1{print $1}'); "
+    f"iptables -D INPUT -i %i -p tcp -m multiport --dports {NETWATCH_CONTROL_PORTS} -j REJECT; "
     "iptables -D OUTPUT ! -o %i -m mark ! --mark $(wg show %i fwmark) "
     "-m addrtype ! --dst-type LOCAL -j REJECT; "
     "iptables -D OUTPUT -d \"$DOCKER_NET\" -j ACCEPT"
 )
+
 
 class ConfigError(Exception):
     def __init__(self, code: str, message: str):

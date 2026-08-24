@@ -34,6 +34,10 @@ services:
       dockerfile: Dockerfile
     container_name: nw_torrent_engine
     user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     network_mode: "service:vpn"
     depends_on:
       vpn:
@@ -136,6 +140,10 @@ services:
       dockerfile: Dockerfile
     container_name: nw_backend
     user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     network_mode: "service:vpn"
     depends_on:
       vpn:
