@@ -1,4 +1,5 @@
 # NetWatch surface helper
 
-Windows-only helper used to show and resize mpv's embedded `--wid` child HWND.
-It does not launch processes, invoke PowerShell/WMI/shells, or access the network.
+Windows-only helper that finds, shows, and resizes mpv's embedded `--wid` child window.
+
+It does not launch processes, elevate, run shell commands, or access the network.

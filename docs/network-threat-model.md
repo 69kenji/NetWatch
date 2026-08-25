@@ -1,24 +1,118 @@
 # NetWatch network threat model
 
-## Scope
+## Goal
 
-NetWatch is a local Windows application whose Internet-facing services run inside Docker/WSL. Its primary network-security goal is simple:
+NetWatch's Internet-facing services must use the inner WireGuard tunnel. If that path is unavailable, NetWatch should lose connectivity rather than fall back to normal Docker or Windows egress.
 
-> NetWatch traffic should use the inner WireGuard tunnel and fail closed when that path is unavailable.
+This is a traffic-isolation model, not an anonymity guarantee.
 
-This is a traffic-isolation design, not an anonymity system.
+## Runtime layout
 
-## Security goals
+```text
+Windows Electron / mpv
+        |
+        | localhost / IPC
+        v
++---------------------------------------------+
+| shared VPN network namespace                |
+|                                             |
+| backend         :8000                       |
+| torrent-engine  :8081                       |
+| Prowlarr        :9696                       |
+| FlareSolverr    :8191                       |
+|                                             |
+| ordinary traffic -> wg0                     |
+| wg0 peers -> control ports -> REJECT        |
++---------------------+-----------------------+
+                      |
+                      v
+               WireGuard relay
+                      |
+              [optional host VPN]
+                      |
+                      v
+                   Internet
+```
 
-NetWatch 1.0.x is designed so that:
+Backend, torrent-engine, Prowlarr, and FlareSolverr use `network_mode: service:vpn`, so they share the VPN service's network namespace instead of receiving independent Docker egress paths.
 
-- During normal NetWatch runtime, Windows-side NetWatch components use localhost/IPC rather than direct Internet connections.
-- Backend, torrent-engine, Prowlarr, and FlareSolverr share the VPN service's network namespace.
-- Ordinary Internet traffic from that namespace leaves through `wg0`.
-- WireGuard failure blocks application traffic instead of falling back to Docker's normal egress.
-- DNS uses the VPN-side resolver supplied by the imported WireGuard configuration.
-- IPv6 is disabled in the VPN namespace for 1.0.x.
-- Host-facing Docker publications bind to `127.0.0.1` only, and VPN-peer access to internal control ports is rejected by the namespace firewall.
+## Enforced boundaries
+
+- Ordinary application traffic leaves the shared namespace through `wg0`.
+- WireGuard transport packets may use the namespace's Docker interface to reach the VPN relay.
+- The kill switch rejects ordinary non-local traffic that tries to leave outside `wg0`.
+- DNS uses the IPv4 resolver from the imported WireGuard profile.
+- IPv6 is disabled in the VPN namespace for NetWatch 1.0.x.
+- Windows publishes only `127.0.0.1:8000` (backend) and `127.0.0.1:9696` (Prowlarr).
+- Torrent-engine and FlareSolverr are not published to Windows.
+- The namespace firewall rejects WireGuard-peer access to control ports `8000`, `8081`, `8191`, and `9696`.
+
+The backend and torrent-engine listen on all IPv4 interfaces inside the shared namespace because Docker's Windows port publication is DNATed to that namespace. Their listener address is not the remote-access boundary; the host bindings and namespace firewall are.
+
+## Trust boundaries
+
+### Windows app
+
+Electron and mpv are local components. Their intended network dependency is the backend on `127.0.0.1:8000`.
+
+Loopback limits remote exposure but does not protect against another process already running in the same Windows user session.
+
+Credential-entry windows use sandboxed Electron renderers with narrow preload/IPC surfaces. Stored credentials are not exposed back to the renderer.
+
+### Installer bootstrap
+
+Before WSL/Docker exists, the installer may use Windows servicing tools and download Docker Desktop directly from Docker's `desktop.docker.com` HTTPS endpoint. The project-owned prerequisite helper verifies the Docker installer with Windows Authenticode and requires a Docker Inc. signer before running it.
+
+This exception applies only to prerequisite installation. Normal NetWatch provider, metadata, subtitle, indexer, and torrent traffic still uses the inner VPN runtime.
+
+### WSL and Docker
+
+NetWatch relies on Windows, WSL2, and Docker Desktop to enforce process, namespace, route, capability, and published-port boundaries. A local administrator who deliberately changes those controls is outside this model.
+
+NetWatch-owned backend and torrent-engine containers run as UID 1000 with Linux capabilities dropped and `no-new-privileges`. Prowlarr and FlareSolverr use their upstream container startup models; `docker/verify-networking.py` checks the effective application-process UID and fails if those processes run as root.
+
+### VPN profiles
+
+Generic WireGuard and VPNBook profiles use the same parser, routing, kill switch, DNS handling, and live verification. The provider label and VPNBook expiry estimate are UI metadata only.
+
+Replacement profiles are staged and applied on restart. The new tunnel must pass the normal VPN checks before NetWatch proceeds.
+
+### External services
+
+VPN infrastructure, trackers, peers, indexers, metadata providers, and subtitle providers are external and untrusted. NetWatch does not guarantee their availability or correctness.
+
+## DNS and IPv6
+
+Setup writes the validated WireGuard DNS address to:
+
+```text
+~/.local/share/netwatch/config/resolv.conf
+```
+
+Backend, torrent-engine, Prowlarr, and FlareSolverr use that resolver. NetWatch does not intentionally fall back to Windows DNS, Docker's embedded resolver, or a public resolver outside the tunnel.
+
+IPv6 is disabled in the VPN namespace for 1.0.x instead of maintaining a separate protected IPv6 route.
+
+## Optional Windows host VPN
+
+A Windows host VPN can add another layer, but the inner WireGuard tunnel remains NetWatch's required path.
+
+If both are used, choose different relay endpoints. Changing or reconnecting the host VPN while NetWatch is running can interrupt Docker/WSL networking; restart NetWatch afterward.
+
+## Verified behavior
+
+The 1.0.x architecture has been checked with packet capture, socket inspection, route/firewall inspection, and deliberate failure tests.
+
+Verified behavior includes:
+
+- Windows NetWatch/mpv traffic uses local services rather than direct provider/torrent connections.
+- final Internet destinations appear on inner `wg0`;
+- the underlying Docker interface carries WireGuard transport rather than ordinary final destinations;
+- DNS follows the protected path;
+- no IPv6 bypass was observed;
+- loss of `wg0`, the VPN container, or VPN-side DNS causes loss of connectivity rather than fallback egress.
+
+`docker/verify-networking.py` checks the expected runtime structure. Packet capture remains the stronger verification method after network changes.
 
 ## Non-goals
 
@@ -27,180 +121,6 @@ NetWatch does not claim to provide:
 - anonymity;
 - protection from a compromised Windows host, Docker/WSL administrator, VPN provider, or dependency;
 - independent trust domains when two tunnels use the same VPN provider;
-- seamless recovery across host-network/VPN changes;
-- legal protection or guarantees about third-party services, indexers, trackers, peers, or metadata providers.
+- uninterrupted service during host-network/VPN changes;
+- legal protection or guarantees about third-party services.
 
-## Runtime topology
-
-```text
-Windows Electron / native mpv
-            |
-            | localhost / IPC
-            v
-+--------------------------------------------------+
-| shared nw_vpn network namespace                  |
-|                                                  |
-| backend         namespace TCP :8000              |
-| torrent-engine  namespace TCP :8081              |
-| Prowlarr        namespace TCP :9696              |
-| FlareSolverr    namespace TCP :8191              |
-|                                                  |
-| INPUT from wg0 -> control ports -> REJECT        |
-|                                                  |
-| ordinary traffic -> wg0 -> encrypted WG -> eth0 |
-+--------------------------------------------------+
-                         |
-                         v
-                  inner VPN relay
-                         |
-                  [optional host VPN]
-                         |
-                         v
-                      Internet
-```
-
-The Internet-facing application services use:
-
-```text
-network_mode: service:vpn
-```
-
-They therefore do not receive independent Docker default routes.
-
-The backend and torrent-engine Uvicorn processes deliberately listen on all IPv4
-interfaces **inside this shared namespace**. Docker's Windows-to-container port
-publication is DNATed to the namespace's Docker interface, so changing those
-listeners to `127.0.0.1` would make the published host ports unreachable. The
-listener address is therefore not used as the remote-access boundary. Instead,
-NetWatch publishes only required host ports on Windows loopback and installs an
-`INPUT -i wg0` firewall rule rejecting TCP access to control ports
-`8000,8081,8191,9696` from WireGuard peers. The runtime verifier checks that exact
-rule and its ordering.
-
-## Trust boundaries
-
-### Windows desktop
-
-Electron and mpv are local application components. Their intended network dependency is the backend on `127.0.0.1:8000`.
-
-Loopback reduces remote exposure but is not an authentication boundary against other processes already running in the same Windows session.
-
-First-run credential entry uses separate sandboxed Electron windows with narrow preload APIs. They do not expose generic filesystem, shell, secret-readback, or arbitrary-URL IPC.
-
-### Installer prerequisite bootstrap
-
-The normal-runtime egress invariant begins after WSL/Docker prerequisites exist. The Windows NSIS bootstrap is a separate trust phase: with explicit user approval it may invoke Microsoft `wsl.exe`/Windows servicing and may download Docker Desktop directly from Docker's pinned `desktop.docker.com` HTTPS endpoint before the inner VPN runtime exists. NetWatch performs these actions through a fixed-purpose native helper rather than PowerShell. The Docker download is size/redirect bounded and the installer must pass Windows Authenticode validation with a Docker Inc. signer identity before execution.
-
-This bootstrap exception does not authorize the installed Electron application, mpv, backend, torrent engine, Prowlarr, or FlareSolverr to bypass the inner VPN during normal operation.
-
-### WSL and Docker
-
-NetWatch relies on Windows, WSL2, and Docker Desktop to enforce process, namespace, route, capability, and published-port boundaries. A local administrator who deliberately changes those controls is outside this model.
-
-### Inner VPN namespace
-
-`nw_vpn` is the authoritative egress boundary. The VPN container retains the network administration capability required to configure WireGuard and firewall/routing policy; application containers do not receive independent egress networks.
-
-NetWatch-owned backend and torrent-engine processes run as UID 1000 with all Linux
-capabilities dropped and `no-new-privileges`. Prowlarr and FlareSolverr are
-third-party images whose startup models are controlled upstream, so NetWatch does
-not force a Compose `user:` override that could break their initialization.
-Instead, `docker/verify-networking.py` checks the **effective application process
-UIDs at runtime** and fails verification if those application processes are root.
-This is a runtime assertion, not a claim that every supervisor/init process inside
-third-party images is non-root.
-
-### VPN profile metadata
-
-`Generic WireGuard` and `VPNBook` use the same canonical WireGuard parser, routing, kill switch, and live verification. The selected provider label and VPNBook expiry estimate are UX metadata only and cannot make a failing tunnel pass the security gate.
-
-WireGuard replacements are staged privately and promoted on restart. The promoted tunnel must pass the normal live VPN verification before setup is considered complete.
-
-### External services
-
-VPN infrastructure, trackers, peers, indexers, metadata providers, subtitle providers, and other Internet endpoints are external and untrusted. NetWatch cannot guarantee their availability or correctness.
-
-## Host-facing services
-
-Only the services that need Windows access are published:
-
-```text
-127.0.0.1:8000 -> backend
-127.0.0.1:9696 -> Prowlarr
-```
-
-Torrent-engine and FlareSolverr remain internal to the shared namespace.
-
-## Routing and kill switch
-
-The WireGuard namespace uses policy routing so ordinary traffic is sent through `wg0`, while WireGuard's own marked transport packets may use the underlying Docker interface to reach the VPN relay.
-
-The kill switch rejects ordinary non-local traffic that attempts to leave outside `wg0`. The existence of a Docker `eth0` default route is therefore not by itself a bypass: it is required for the encrypted WireGuard transport.
-
-Docker healthchecks are liveness signals, not the security boundary. The firewall/policy-routing rules provide fail-closed enforcement.
-
-## DNS
-
-Setup derives `~/.local/share/netwatch/config/resolv.conf` from the validated IPv4 DNS entry in the imported WireGuard configuration. Backend, torrent-engine, Prowlarr, and FlareSolverr mount that resolver.
-
-NetWatch does not intentionally fall back to Windows DNS, Docker's embedded resolver, or a public resolver outside the tunnel. If the configured VPN-side DNS path fails, name resolution is expected to fail.
-
-## IPv6
-
-IPv6 is disabled in the VPN namespace for NetWatch 1.0.x. The release model therefore assumes IPv4 application traffic over WireGuard rather than maintaining a second fail-closed IPv6 routing policy.
-
-## Optional Windows host VPN
-
-A Windows host VPN can add defense-in-depth around the inner tunnel:
-
-```text
-Windows host VPN -> relay A
-NetWatch WireGuard -> relay B
-NetWatch services -> Internet
-```
-
-The inner WireGuard tunnel remains authoritative. If both layers use the same provider, they are not independent trust domains.
-
-Use different host and inner relay endpoints. Using the exact same relay for both layers is not a supported reliability target.
-
-Changing/disconnecting/reconnecting the host VPN while NetWatch is running can leave Docker/WSL connectivity unusable. Restart NetWatch after such a transition. The validated failure mode remained closed rather than falling back to direct Internet access.
-
-## Release verification
-
-The 1.0.x network model was verified with packet capture, process/socket inspection, routing/firewall inspection, and deliberate failure tests.
-
-Observed properties included:
-
-- Windows NetWatch/mpv sockets used the local backend rather than public TCP destinations.
-- Final Internet destinations were visible on inner `wg0`.
-- The VPN namespace's underlying interface carried the WireGuard relay transport rather than ordinary final destinations.
-- DNS followed the VPN path.
-- No IPv6 bypass was observed.
-
-Failure testing produced the following results:
-
-| Scenario | Result |
-| --- | --- |
-| Host VPN absent, inner VPN available | Inner VPN remained the NetWatch egress path |
-| Inner `wg0` down | Internet/DNS failed closed |
-| VPN container unavailable | Shared application networking failed closed |
-| VPN-side DNS blocked | DNS failed without resolver fallback |
-| Both VPN layers unavailable | No NetWatch Internet connectivity |
-| Host VPN changed while NetWatch ran | No leak observed; restart may be required |
-| Same exact host/inner relay | Unreliable; unsupported configuration |
-
-These results describe the tested 1.0.x architecture, not every possible future Windows/Docker/VPN environment.
-
-## Preserving the model
-
-Changes to the following require a new security review and network verification:
-
-- `network_mode: service:vpn` for Internet-facing NetWatch services;
-- loopback-only host publishing and the `wg0` control-port INPUT rejection rule;
-- WireGuard policy routing and kill-switch behavior;
-- VPN-routed DNS without an unprotected fallback;
-- IPv6-disable behavior unless equivalent protected IPv6 routing is implemented;
-- container privileges/capabilities;
-- removal or replacement of the authoritative inner VPN.
-
-`docker/verify-networking.py` provides structural runtime checks, but packet capture remains the stronger way to validate the real path after network-architecture changes.

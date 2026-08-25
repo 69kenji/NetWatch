@@ -502,11 +502,6 @@ class TorrentEngine:
                 "num_leechs": max(0, int(getattr(status, "num_peers", 0) or 0)),
                 "time_critical": True,
                 "scheduler": "piece_deadlines",
-                # Compatibility fields retained to preserve the existing backend status
-                # contract; direct libtorrent scheduling does not use these flags.
-                "seq_dl": False,
-                "f_l_piece_prio": False,
-                "force_start": True,
                 "has_metadata": bool(getattr(status, "has_metadata", False)),
             }
 

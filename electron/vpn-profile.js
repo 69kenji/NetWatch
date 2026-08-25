@@ -32,7 +32,6 @@ function wireGuardFileTimestamps(stat, nowMs = Date.now()) {
 }
 
 module.exports = {
-  VPN_PROFILE_TYPES,
   VPNBOOK_REFRESH_URL,
   normalizeVpnProfileType,
   wireGuardFileTimestamps,

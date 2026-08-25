@@ -2,33 +2,40 @@
 
 ## Supported version
 
-Security fixes target the current public NetWatch release and current default branch. Older development snapshots are not maintained releases.
+Security fixes target the current public NetWatch release and the default branch. Older development snapshots are not maintained.
 
 ## Reporting a vulnerability
 
-Do not publish exploit details, credentials, private configuration, or sensitive logs in a public issue.
+Use GitHub's private **Report a vulnerability** flow when available.
 
-Use GitHub's private **Report a vulnerability** flow when available. Include the affected version/commit, component, prerequisites, impact, and a minimal reproduction or proof of concept.
+Include:
 
-If private reporting is unavailable, open a short public issue requesting a private contact without including exploit details.
+- affected version or commit;
+- affected component;
+- prerequisites;
+- impact;
+- a minimal reproduction or proof of concept.
 
-Never attach real API keys, tokens, `backend/.env`, WireGuard private configuration, Prowlarr databases/configuration, or provider credentials.
+Do not post exploit details or secrets in a public issue. Never attach API keys, tokens, `backend/.env`, private WireGuard configuration, or Prowlarr user data.
 
-## Useful security reports
+If private reporting is unavailable, open a short public issue asking for a private contact without including exploit details.
+
+## Useful reports
 
 Examples include:
 
-- Windows-side NetWatch traffic reaching the Internet directly instead of localhost/IPC;
-- backend, torrent-engine, Prowlarr, or FlareSolverr bypassing the inner WireGuard path;
+- NetWatch traffic bypassing the inner WireGuard path;
 - DNS or IPv6 bypass;
 - loss of `wg0` falling back to unprotected Internet access;
-- services that should be loopback-only becoming remotely reachable;
-- credential disclosure, unsafe URL/redirect handling, path traversal, command execution, or arbitrary local-file access.
+- internal services becoming remotely reachable;
+- credential disclosure;
+- unsafe URL/redirect handling;
+- path traversal, command execution, or arbitrary local-file access.
 
-A fail-closed loss of connectivity is an availability issue, not by itself a privacy bypass.
+Loss of connectivity by itself is not a privacy bypass if the network fails closed.
 
 See [`docs/network-threat-model.md`](docs/network-threat-model.md) for the intended network boundary.
 
 ## Disclosure
 
-Please allow reasonable time to reproduce, fix, test, and publish a security update before public disclosure. NetWatch does not offer a bug bounty or guarantee a specific response timeline.
+Please allow time to reproduce, fix, test, and publish a security update before public disclosure. NetWatch does not offer a bug bounty or guarantee a response timeline.

@@ -146,21 +146,6 @@ async def resolve_public_http_target(
     return ResolvedHttpTarget(candidate, scheme, hostname, port, rendered)
 
 
-async def validate_public_http_url(
-    url: str,
-    *,
-    require_https: bool = False,
-    allowed_private_authorities: Iterable[tuple[str, str, int]] = (),
-) -> str:
-    """Compatibility validator for callers that do not make a later connection."""
-    target = await resolve_public_http_target(
-        url,
-        require_https=require_https,
-        allowed_private_authorities=allowed_private_authorities,
-    )
-    return target.url
-
-
 async def read_response_limited(response: aiohttp.ClientResponse, max_bytes: int) -> bytes:
     """Read a response while enforcing a hard decoded-payload byte limit."""
     if max_bytes <= 0:

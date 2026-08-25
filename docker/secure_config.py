@@ -5,7 +5,6 @@ import base64
 import ipaddress
 import json
 import os
-import re
 import stat
 import sys
 import tempfile

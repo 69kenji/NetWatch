@@ -1,6 +1,6 @@
 {
   "name": "netwatch",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Self-hosted Windows media client with a Docker/VPN-isolated runtime",
   "license": "GPL-3.0-only",
   "main": "electron/main.js",
@@ -14,8 +14,7 @@
     "docker:down": "docker compose -f docker/docker-compose.yml down",
     "package:dir": "npm run build:renderer && electron-builder --win --dir",
     "package:win": "npm run build:renderer && electron-builder --win nsis",
-    "backend:unsafe-host-dev": "cd backend && uvicorn main:app --reload --port 8000",
-    "checksum:file": "node packaging/write-sha256.js"
+    "backend:unsafe-host-dev": "cd backend && uvicorn main:app --reload --port 8000"
   },
   "dependencies": {
     "axios": "^1.18.1",
@@ -52,8 +51,7 @@
           "portable_config/**/*",
           "README.md",
           "Copyright.txt",
-          "LICENSE.GPL-2.0",
-          "BUILD-PROVENANCE.md"
+          "LICENSE.GPL-2.0"
         ]
       },
       {
@@ -62,8 +60,7 @@
         "filter": [
           "netwatch-surface-helper.exe",
           "README.md",
-          "GO-LICENSE.txt",
-          "BUILD-PROVENANCE.md"
+          "GO-LICENSE.txt"
         ]
       },
       {
@@ -74,7 +71,9 @@
           "!.env",
           "!__pycache__/**",
           "!*.pyc",
-          "!*.pyo"
+          "!*.pyo",
+          "!test_*.py",
+          "!scripts/**"
         ]
       },
       {
@@ -84,7 +83,8 @@
           "**/*",
           "!__pycache__/**",
           "!*.pyc",
-          "!*.pyo"
+          "!*.pyo",
+          "!test_*.py"
         ]
       },
       {
@@ -143,7 +143,7 @@
       "include": "build/installer.nsh",
       "allowToChangeInstallationDirectory": true
     },
-    "copyright": "Copyright © 2026 NetWatch contributors"
+    "copyright": "Copyright \u00a9 2026 NetWatch contributors"
   },
   "engines": {
     "node": ">=22.12 <23"

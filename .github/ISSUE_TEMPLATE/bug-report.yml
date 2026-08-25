@@ -14,7 +14,7 @@ body:
     attributes:
       label: NetWatch version
       description: Release version or commit, if known.
-      placeholder: "1.0.2 or commit SHA"
+      placeholder: "1.0.7 or commit SHA"
     validations:
       required: true
 

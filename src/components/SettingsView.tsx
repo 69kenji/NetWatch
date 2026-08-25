@@ -257,7 +257,7 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
           <strong>VPN</strong>
 
           <div className="nw-vpn-profile-controls">
-            <label>
+            <label className="nw-vpn-profile-field">
               <span>VPN provider</span>
               <select
                 className="nw-settings-select nw-vpn-profile-select"
@@ -269,6 +269,13 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
                 <option value="vpnbook">VPNBook</option>
               </select>
             </label>
+
+            {vpnProfile && !vpnRestartRequired && (
+              <div className="nw-vpn-config-status">
+                <span>Configuration</span>
+                <strong>Current configuration is active.</strong>
+              </div>
+            )}
 
             {vpnProfile?.profile_type === 'vpnbook' && (
               <div className={`nw-vpn-expiry ${vpnBookStatus === 'Estimated expired' ? 'is-warning' : ''}`}>
@@ -288,13 +295,17 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
             {vpnProfileError && <p className="nw-vpn-profile-error">{vpnProfileError}</p>}
 
             <div className="nw-vpn-profile-actions">
+              <button className="btn btn-secondary" onClick={() => void replaceWireGuard()} disabled={vpnProfileBusy || !vpnProfile || vpnRestartRequired}>
+                {vpnProfileBusy ? 'Working…' : 'Replace configuration'}
+              </button>
               {vpnProfile?.profile_type === 'vpnbook' && (
                 <button className="btn btn-secondary" onClick={() => void openVpnBook()} disabled={vpnProfileBusy}>
                   Get new VPNBook config
                 </button>
               )}
-              <button className="btn btn-secondary" onClick={() => void replaceWireGuard()} disabled={vpnProfileBusy || !vpnProfile || vpnRestartRequired}>
-                {vpnProfileBusy ? 'Working…' : 'Replace configuration'}
+              <button className="btn btn-secondary" onClick={() => void runVpnSanity()} disabled={vpnChecking}>
+                {vpnChecking ? <RefreshCircle width={16} height={16} className="nw-spin" /> : null}
+                {vpnChecking ? 'Checking…' : 'Test connection'}
               </button>
               {vpnRestartRequired && (
                 <button className="btn btn-primary" onClick={() => void restartApp()} disabled={vpnProfileBusy}>
@@ -333,10 +344,6 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
             </div>
           )}
         </div>
-        <button className="btn btn-secondary" onClick={() => void runVpnSanity()} disabled={vpnChecking}>
-          {vpnChecking ? <RefreshCircle width={16} height={16} className="nw-spin" /> : null}
-          {vpnChecking ? 'Checking…' : 'Test'}
-        </button>
       </section>
 
       <section className="nw-settings-runtime nw-credentials-panel">

@@ -35,9 +35,6 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, Number(value)))
 }
 
-function is2xx(value) {
-  return Number.isFinite(value) && value >= 200 && value < 300
-}
 
 function startupPlaybackReady(state) {
   return Boolean(
@@ -85,9 +82,7 @@ function nativeWindowHandleToDecimal(win) {
 function resolveMpvExecutable() {
   const configured = process.env.NETWATCH_MPV_PATH
   if (configured) {
-    // NetWatch 1.0.3+ launches the actual GUI-subsystem mpv executable directly from
-    // Electron. Prefer mpv.exe over the small console wrapper so there is no
-    // intermediate console process and no need to hide a child console.
+    // Prefer the GUI-subsystem executable over the console wrapper.
     if (process.platform === 'win32' && path.basename(configured).toLowerCase() === 'mpv.com') {
       const guiEntry = path.join(path.dirname(configured), 'mpv.exe')
       if (fs.existsSync(guiEntry)) return guiEntry
@@ -134,10 +129,7 @@ function resolveSurfaceHelperExecutable() {
 }
 
 async function spawnMpvOnWindows(executable, args) {
-  // Experimental 1.0.3 direct-launch path. Start mpv as a detached Electron
-  // child with no PowerShell, WMI, native launcher, or shell intermediary.
-  // This candidate intentionally tests current Electron/Windows/mpv behavior
-  // without the historical special process-launch workaround.
+  // Start mpv directly as a detached Electron child without a shell intermediary.
   const localCwd = process.env.SystemRoot || process.env.USERPROFILE || 'C:\\Windows'
 
   return new Promise((resolve, reject) => {
@@ -457,9 +449,8 @@ class MpvController extends EventEmitter {
 
     if (!parentHwnd) return null
 
-    // NetWatch 1.0.3+ keeps direct Electron -> mpv launch and
-    // restores only the Win32 surface fitting required to make mpv's --wid
-    // child visible. The helper cannot launch processes or invoke a shell.
+    // The helper only fits mpv's existing --wid child into the Electron surface;
+    // it cannot launch processes or invoke a shell.
     if (
       this.surfaceHelper &&
       this.surfaceHelper.exitCode === null &&
@@ -909,14 +900,4 @@ class MpvController extends EventEmitter {
   }
 }
 
-module.exports = {
-  seekOutsideBufferedWindow,
-  MpvController,
-  nativeWindowHandleToDecimal,
-  resolveMpvExecutable,
-  resolveSurfaceHelperExecutable,
-  spawnMpvOnWindows,
-  startMpvSurfaceWatcherOnWindows,
-  is2xx,
-  startupPlaybackReady,
-}
+module.exports = { MpvController }

@@ -3,7 +3,6 @@ import asyncio
 import aiohttp
 
 from config import settings
-from services.exceptions import DependencyUnavailableError
 
 
 class FlareSolverrService:

@@ -21,28 +21,18 @@
   />
 </p>
 
-NetWatch is a Windows 11 desktop media client built with Electron/React, FastAPI, direct `python-libtorrent`, Prowlarr, WireGuard, FlareSolverr, and native Windows mpv.
+NetWatch is a Windows 11 media client built with Electron/React, FastAPI, libtorrent, Prowlarr, WireGuard, FlareSolverr, and mpv.
 
-Its Internet-facing services share one Docker network namespace behind an inner WireGuard tunnel. Windows-facing APIs are published on loopback only, and loss of the inner VPN is intended to fail closed.
+Torrent, metadata, subtitle, and indexer traffic runs inside a shared Docker/WSL network namespace behind an inner WireGuard tunnel. The Windows app talks to the local backend; it does not directly make provider or torrent connections.
 
-## Architecture
+## Features
 
-```text
-Windows Electron / native mpv
-        |
-        | localhost / IPC
-        v
-backend + torrent engine + Prowlarr + FlareSolverr
-        |
-        | shared VPN namespace
-        v
-       wg0
-        |
-        v
-     Internet
-```
-
-For the full network/privacy model, see [`docs/network-threat-model.md`](docs/network-threat-model.md).
+- Home, Discover, and search for movies, TV, and anime through TMDB.
+- Torrent discovery through your Prowlarr indexers, with bundled FlareSolverr support for indexers that need it.
+- Direct libtorrent streaming with seek-aware buffering.
+- Native mpv playback with fullscreen, seeking, audio tracks, subtitles, buffering, and network stats.
+- Optional OpenSubtitles and SubDL integration.
+- Inner WireGuard routing with fail-closed startup checks, VPN-side DNS, and optional VPNBook profile reminders.
 
 ## Screenshots
 
@@ -62,132 +52,97 @@ For the full network/privacy model, see [`docs/network-threat-model.md`](docs/ne
   <img src="https://github.com/user-attachments/assets/00689fee-27ec-42f9-94f4-2ae4d5450fce" alt="NetWatch player" width="900" />
 </p>
 
-## Features
-
-- Home, Discover, and unified TMDB search for movies, TV, and anime.
-- Torrent discovery through user-configured Prowlarr indexers, with bundled FlareSolverr available as an indexer proxy.
-- Direct libtorrent streaming with seek-aware HTTP Range scheduling.
-- Native Windows mpv playback with fullscreen, seeking, audio tracks, subtitles, buffering/recovery, and live network telemetry. Normal playback launches bundled mpv directly from Electron without PowerShell or an intermediate launcher helper.
-- OpenSubtitles and SubDL subtitle integration.
-- Inner WireGuard routing, VPN-side DNS, loopback-only host exposure, startup network verification, and optional VPNBook expiry reminders.
-
 ## Requirements
 
-NetWatch 1.0 targets **x64/AMD64 Windows 11 23H2 (build 22631) or newer**. Windows Home, Pro, Enterprise, and Education are supported when the required virtualization features are available.
+NetWatch 1.0 supports **x64/AMD64 Windows 11 23H2 (build 22631) or newer**.
 
-You will need:
+You need:
 
-- WSL2 and a normal Linux distribution; Ubuntu is recommended.
+- WSL2 with a normal Linux distribution; Ubuntu is recommended.
 - Docker Desktop using the WSL2 backend and integrated with that distribution.
-- A full-tunnel WireGuard client configuration. Generic providers and VPNBook profiles are supported.
-- A TMDB API key. OpenSubtitles and SubDL API keys are optional and can be added later in Settings.
-- Prowlarr with at least one usable indexer and its API key.
+- A full-tunnel WireGuard client configuration. Generic WireGuard and VPNBook profiles are supported.
+- A TMDB API key.
+- Prowlarr with at least one usable indexer and a 32-character API key.
 
-The Windows installer can guide you through installing or enabling WSL, Ubuntu, and Docker Desktop when needed. Launch Setup normally; do not use **Run as administrator**. NetWatch 1.0.6 uses a fixed-purpose native prerequisite helper rather than PowerShell for these setup actions. Only the explicit WSL feature/package action requests UAC; Ubuntu and Docker remain current-user steps.
+Optional subtitle providers:
 
-If endpoint security interrupts prerequisite setup, NetWatch stops waiting when the helper heartbeat disappears and reports the interruption instead of treating a partial install as ready. Allow any trusted Microsoft/Ubuntu/Docker setup process already running to finish, then use **Refresh checks** or the official manual setup links. Do not globally allow-list `powershell.exe` or disable endpoint protection just for NetWatch.
+- OpenSubtitles: 32-character API key.
+- SubDL: `subdl_` plus a 43-character key suffix. NetWatch supplies the `subdl_` prefix in the UI.
 
-> **TorrentDownload:** this indexer proved unreliable during 1.0 testing. Prowlarr grabs can resolve to magnets whose reported swarm counts do not reflect usable peers. Prefer another general-purpose indexer.
-
-Cloudflare-protected indexers should be configured in Prowlarr rather than in NetWatch itself. The bundled FlareSolverr service is reachable from Prowlarr at `http://127.0.0.1:8191`; assign a matching Prowlarr indexer-proxy tag to the indexers that need it.
+The installer can help install or enable WSL, Ubuntu, and Docker Desktop. Launch Setup normally; do not use **Run as administrator**. Only the WSL servicing step requests UAC when needed.
 
 ## First run
 
-The packaged setup flow is:
+1. Select **Generic WireGuard** or **VPNBook** and import the provider `.conf`.
+2. NetWatch verifies the VPN, DNS path, kill switch, and egress.
+3. Enter the required TMDB API key. OpenSubtitles and SubDL can be skipped.
+4. Configure Prowlarr and enter its API key.
+5. Start NetWatch.
 
-1. Select **Generic WireGuard** or **VPNBook**, then import a provider `.conf`.
-2. Verify the inner VPN, kill switch, DNS path, and real egress.
-3. Enter and validate the required TMDB API key. OpenSubtitles and SubDL may be skipped and added later in Settings.
-4. Configure Prowlarr and enter its required API key.
-5. Start NetWatch normally.
+OpenSubtitles and SubDL can be added or replaced later in **Settings**. Settings shows only whether a key is configured; stored key values are never displayed.
 
-NetWatch rewrites the imported WireGuard configuration into its own canonical form. Provider command hooks are rejected, a full IPv4 tunnel (`0.0.0.0/0`) is required, and the VPN configuration must provide a usable IPv4 DNS resolver.
+NetWatch rewrites imported WireGuard profiles into its managed format. Provider command hooks are rejected, a full IPv4 tunnel (`0.0.0.0/0`) is required, and the profile must provide an IPv4 DNS resolver.
 
-VPNBook uses the same WireGuard path; fresh profiles are available from [VPNBook WireGuard](https://www.vpnbook.com/freevpn/wireguard-vpn). Selecting **VPNBook** only enables provider-specific guidance and an estimated seven-day profile-expiry reminder based on local file/import timestamps. It does not change routing or VPN verification.
+VPNBook uses the same WireGuard path as any other provider. Its profile-expiry estimate is only a reminder.
 
-From **Settings → VPN**, you can switch between **Generic WireGuard** and **VPNBook**, open VPNBook's refresh page, or replace the current `.conf`. Replacements are staged and take effect after restarting NetWatch, when the normal fail-closed VPN verification runs again.
-
-Secrets are stored in the selected WSL distribution under `~/.local/share/netwatch/config/`, not in the Windows application directory or source tree.
-
-## Persistent data
-
-Packaged state lives under:
+Private state is stored in the selected WSL distribution under:
 
 ```text
 ~/.local/share/netwatch/
-├── runtime/                         regenerated from the installed app
-├── config/
-│   ├── backend.env                 API credentials
-│   ├── resolv.conf                 VPN-side DNS
-│   └── wireguard/wg_confs/
-│       ├── wg0.conf                active canonical profile
-│       └── wg0.pending.conf        staged replacement, when present
-└── data/
-    ├── prowlarr/
-    ├── backend-cache/
-    ├── vpn-profile.json            provider/reminder metadata only
-    ├── vpn-profile.pending.json    staged replacement metadata, when present
-    └── setup.log
 ```
 
-`config/` and `data/` are preserved across normal reinstall/upgrade and are not removed by a normal NetWatch uninstall. Torrent playback data is ephemeral.
+Normal reinstall/upgrade preserves this state.
 
-### 1.0.6 credential setup
+### Upgrade note
 
-First launch requires WireGuard, a 32-character TMDB API key, and a 32-character Prowlarr API key. OpenSubtitles and SubDL are optional; they can be added or replaced later in Settings without exposing saved key values to the renderer. OpenSubtitles keys are exactly 32 characters. SubDL keys are stored as `subdl_` followed by exactly 43 characters; NetWatch shows the fixed `subdl_` prefix and asks users to paste only the suffix. Upgrading from 1.0.5 preserves existing provider credentials, and missing optional subtitle credentials do not reopen first-run onboarding.
+Upgrades preserve existing API credentials. Users upgrading from 1.0.4 or earlier may be asked to re-import their provider WireGuard `.conf` once because the managed firewall format changed in 1.0.5. Re-import the original provider profile rather than copying an old NetWatch-managed `wg0.conf`. Missing optional subtitle keys do not reopen first-run setup.
 
-### Upgrading from 1.0.4 to 1.0.5
+## Prowlarr and FlareSolverr
 
-The 1.0.5 networking hardening changes NetWatch's canonical WireGuard firewall hooks. On the first 1.0.5 start, an existing 1.0.4-managed `wg0.conf` may therefore be rejected and setup may ask you to import your VPN provider's WireGuard `.conf` again. This is an intentional one-time refresh of the managed WireGuard configuration; existing TMDB, OpenSubtitles, SubDL, Prowlarr, and other saved setup credentials are preserved. Re-import the original provider configuration rather than manually copying the old NetWatch-managed `wg0.conf`.
+NetWatch uses Prowlarr as its only indexer interface. Configure indexers in Prowlarr, not in NetWatch.
 
-## Player process model
+For Cloudflare-protected indexers, the bundled FlareSolverr service is available to Prowlarr at:
 
-NetWatch 1.0.3+ launches bundled `mpv.exe` directly from Electron with Node's shell-free `child_process.spawn` path. A small project-owned `netwatch-surface-helper.exe` only locates, shows, and resizes mpv's existing embedded child window. It cannot launch processes and performs no network access. Normal playback does not invoke PowerShell, WMI scripting, `Add-Type`, or `csc.exe`.
+```text
+http://127.0.0.1:8191
+```
+
+Assign the same Prowlarr proxy tag to the indexers that should use it.
 
 ## Build from source
 
-Build the Windows application from a normal **Windows NTFS** path such as:
+Build from a normal Windows NTFS path, not `\\wsl.localhost\...`.
 
-```text
-C:\NetWatchBuild\netwatch
-```
-
-Do not build Electron/NSIS from `\\wsl.localhost\...`.
-
-The validated Node range is **`>=22.12 <23`**. From PowerShell:
+Required Node range: **`>=22.12 <23`**.
 
 ```powershell
-cd C:\NetWatchBuild\netwatch
-node --version
 npm ci
 npm run package:dir
 ```
 
-Run the unpacked build:
+Test the unpacked application:
 
 ```text
 release\win-unpacked\NetWatch.exe
 ```
 
-Build the NSIS installer after validating the unpacked application:
+Build the installer:
 
 ```powershell
 npm run package:win
 ```
 
-The release artifact is written as:
+Output:
 
 ```text
-release\NetWatch-Setup-1.0.6.exe
+release\NetWatch-Setup-1.0.7.exe
 ```
 
-Use `npm ci` for reproducible builds. Do not replace it with `npm install` and do not use `npm audit fix --force`.
-
-For packaging/release details, see [`packaging/PACKAGING.md`](packaging/PACKAGING.md).
+Use `npm ci` for reproducible builds. See [`packaging/PACKAGING.md`](packaging/PACKAGING.md) for Windows packaging details.
 
 ## Source development
 
-Source mode expects private local configuration that is ignored by Git:
+Private source-mode configuration is ignored by Git:
 
 ```text
 backend/.env
@@ -195,9 +150,7 @@ docker/wireguard/wg_confs/wg0.conf
 docker/prowlarr/config/
 ```
 
-Create the first two from their `.example` files and fill them with your own credentials/configuration. Never commit real secrets.
-
-When running Electron directly from a Windows checkout, point it at the matching WSL path:
+When running Electron from a Windows checkout, point it at the matching WSL path:
 
 ```powershell
 $env:NETWATCH_WSL_DISTRO = "Ubuntu"
@@ -205,103 +158,67 @@ $env:NETWATCH_WSL_PROJECT_PATH = "/mnt/c/NetWatchBuild/netwatch"
 npx electron .
 ```
 
-The source Compose stack can be started from WSL with:
+Start the source Compose stack from WSL:
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d
 python3 docker/verify-networking.py
 ```
 
-Treat the shared VPN namespace as a unit; do not recreate only the VPN container while leaving dependent services attached to an old namespace.
+Treat the shared VPN namespace as a unit; do not recreate only the VPN container while leaving dependent services attached to the old namespace.
 
 ## Tests
 
-Backend regression suite:
+Backend:
 
 ```bash
 python3 -m unittest discover -s backend -p 'test_*.py'
 ```
 
-Torrent-engine tests:
+Torrent engine:
 
 ```bash
 python3 -m unittest -v torrent-engine/test_engine.py
 ```
 
-Configured-environment smoke scripts are under `backend/scripts/`. Some perform real provider/indexer/torrent operations; use only services and queries you are authorized to use.
 
-## Diagnostics
+Configured-environment smoke scripts are under `backend/scripts/`. Some make real provider, indexer, or torrent requests.
 
-Check the packaged containers:
+## Troubleshooting
 
-```powershell
-docker ps --filter "name=nw_" --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
-```
+**Prerequisite setup was interrupted**  
+Let any trusted Microsoft, Ubuntu, or Docker installer already running finish, then use **Refresh checks**. Do not disable endpoint protection for NetWatch.
 
-Run the structural network verifier:
+**Prowlarr is not ready**  
+Open Prowlarr, finish its setup, configure at least one indexer, and enter its API key in NetWatch.
+
+**VPN or DNS verification fails**  
+Run:
 
 ```powershell
 wsl -d Ubuntu -- sh -lc 'cd ~/.local/share/netwatch/runtime && python3 docker/verify-networking.py'
 ```
 
-Replace `Ubuntu` if NetWatch uses another distribution. A successful check ends with:
+Replace `Ubuntu` if NetWatch uses another distribution.
 
-```text
-Networking verification PASSED.
-```
+**The Windows host VPN changed while NetWatch was running**  
+Restart NetWatch. Host-VPN changes can interrupt Docker/WSL networking.
 
-The host-facing services are intentionally loopback-only:
-
-```text
-http://127.0.0.1:8000   NetWatch backend
-http://127.0.0.1:9696   Prowlarr
-```
-
-Torrent-engine and FlareSolverr are not published as independent Windows services.
-
-## Common problems
-
-**Docker is unavailable**  
-Start Docker Desktop, confirm it is using Linux containers, and verify WSL integration:
-
-```powershell
-wsl -d Ubuntu -- docker info
-```
-
-**First-run setup does not complete**  
-Relaunch NetWatch and let setup re-evaluate the real configuration. Do not move credentials into the installed Windows application directory.
-
-**Prowlarr is not ready**  
-Use **Open Prowlarr**, finish its local setup, configure at least one usable indexer, then paste its API key back into NetWatch.
-
-**VPN/DNS verification fails**  
-Run `docker/verify-networking.py`. Do not work around a failure by giving backend, torrent-engine, Prowlarr, or FlareSolverr an independent Docker egress path.
-
-**VPNBook expiry is unknown or near expiry**  
-Open **Settings → VPN**. Use **Get new VPNBook config** if needed, then **Replace configuration** and restart NetWatch. The countdown is an estimate only; live VPN verification remains authoritative.
-
-**The Windows host VPN was changed while NetWatch was running**  
-Restart NetWatch. Host-VPN transitions can leave Docker/WSL networking unavailable; the validated failure mode remains fail-closed.
-
-**Windows packaging fails from a WSL UNC path**  
-Move the checkout to Windows NTFS and rerun `npm ci` / `npm run package:dir`.
-
-## Optional Windows host VPN
-
-A Windows host VPN may be used as defense-in-depth, but it does not replace NetWatch's inner WireGuard tunnel. When both are enabled, use different relay endpoints. If you disconnect/reconnect the host VPN or change its relay while NetWatch is running, restart NetWatch afterward.
+**Packaging fails from a WSL UNC path**  
+Move the checkout to Windows NTFS and rerun `npm ci` and the packaging command.
 
 ## Security and privacy
 
-NetWatch is designed to reduce accidental unprotected traffic from its own runtime. It does not promise anonymity, protection from a compromised host/VPN provider, legal protection, or uninterrupted third-party services.
+The inner WireGuard tunnel is the authoritative Internet path for NetWatch's backend services. Windows-facing services are published on loopback only, and VPN-side control ports are blocked from WireGuard peers.
 
-Report vulnerabilities according to [`SECURITY.md`](SECURITY.md). Do not post credentials, private WireGuard configuration, API keys, or exploit details in a public issue.
+A Windows host VPN can be used as an extra layer, but it does not replace the inner tunnel.
 
-See [`docs/network-threat-model.md`](docs/network-threat-model.md) for the network architecture, verified failure behavior, and limitations.
+NetWatch does not promise anonymity or protection from a compromised host, VPN provider, dependency, or third-party service. See [`docs/network-threat-model.md`](docs/network-threat-model.md) for the full model and [`SECURITY.md`](SECURITY.md) for vulnerability reporting.
 
 ## License
 
 NetWatch is licensed under **GPL-3.0-only**. See [`LICENSE`](LICENSE).
 
-Third-party components retain their own licenses. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). The bundled GPL-enabled mpv runtime has separate provenance and corresponding-source requirements documented under [`resources/mpv/`](resources/mpv/README.md).
+Third-party components keep their own licenses. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Bundled mpv provenance and corresponding-source details are under [`resources/mpv/`](resources/mpv/README.md).
 
 See [`DISCLAIMER.md`](DISCLAIMER.md) for the project disclaimer.
