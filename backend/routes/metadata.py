@@ -1,7 +1,7 @@
 import re
 import unicodedata
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Path as ApiPath, Query, Response
 
 from services.exceptions import DependencyUnavailableError
 from services.metadata import MetadataService
@@ -24,6 +24,12 @@ _MOVIE_RELEASE_BOUNDARIES = {
     "remux", "x264", "x265", "h264", "h265", "hevc", "av1",
     "proper", "repack", "internal", "extended", "unrated",
 }
+
+
+def _regex_decimal(value: int, *, minimum: int = 0, maximum: int = 9999) -> str:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum or value > maximum:
+        raise ValueError("episode coordinates are out of range")
+    return re.escape(str(value))
 
 
 def _release_tokens(value: str) -> list[str]:
@@ -94,10 +100,12 @@ def _series_release_identity_matches(
     season: int,
     episode: int,
 ) -> bool:
+    season_token = _regex_decimal(season)
+    episode_token = _regex_decimal(episode)
     marker = None
     for pattern in (
-        rf"\bS0*{season}E0*{episode}\b",
-        rf"\b0*{season}x0*{episode}\b",
+        rf"\bS0*{season_token}E0*{episode_token}\b",
+        rf"\b0*{season_token}x0*{episode_token}\b",
     ):
         marker = re.search(pattern, release_title or "", re.I)
         if marker:
@@ -154,9 +162,11 @@ def episode_query(title: str, season: int, episode: int) -> str:
 
 def _episode_title_matches(title: str, season: int, episode: int) -> bool:
     normalized = title or ""
+    season_token = _regex_decimal(season)
+    episode_token = _regex_decimal(episode)
     patterns = [
-        rf"\bS0*{season}E0*{episode}\b",
-        rf"\b0*{season}x0*{episode}\b",
+        rf"\bS0*{season_token}E0*{episode_token}\b",
+        rf"\b0*{season_token}x0*{episode_token}\b",
     ]
     return any(re.search(pattern, normalized, re.I) for pattern in patterns)
 
@@ -172,8 +182,9 @@ def _anime_episode_title_matches(title: str, season: int, episode: int) -> bool:
     if any(token in lowered for token in (" batch", "complete", "season pack", "全集")):
         return False
 
+    episode_value = _regex_decimal(episode)
     episode_token = re.compile(
-        rf"(?:^|[\s._\-\[\(])(?:ep(?:isode)?[\s._\-]*)?0*{episode}(?:v\d+)?(?=$|[\s._\-\]\)])",
+        rf"(?:^|[\s._\-\[\(])(?:ep(?:isode)?[\s._\-]*)?0*{episode_value}(?:v\d+)?(?=$|[\s._\-\]\)])",
         re.I,
     )
     return bool(episode_token.search(title or ""))
@@ -355,7 +366,10 @@ async def series_details(tmdb_id: int):
 
 
 @router.get("/series/{tmdb_id}/seasons/{season_number}")
-async def series_season(tmdb_id: int, season_number: int):
+async def series_season(
+    tmdb_id: int,
+    season_number: int = ApiPath(..., ge=0, le=9999),
+):
     try:
         return await MetadataService.get_season(tmdb_id, season_number)
     except ValueError as exc:
@@ -367,8 +381,8 @@ async def series_season(tmdb_id: int, season_number: int):
 @router.get("/series/{tmdb_id}/episodes/{season_number}/{episode_number}/stream-options")
 async def episode_stream_options(
     tmdb_id: int,
-    season_number: int,
-    episode_number: int,
+    season_number: int = ApiPath(..., ge=0, le=9999),
+    episode_number: int = ApiPath(..., ge=0, le=9999),
     min_seeders: int = Query(1, ge=0, le=100000),
     anime: bool = Query(False),
 ):

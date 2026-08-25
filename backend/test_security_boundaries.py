@@ -8,7 +8,8 @@ from pydantic import ValidationError
 from main import app
 from routes.torrents import AddTorrentRequest, SearchRequest
 from services.http_security import RateLimitMiddleware
-from services.net_safety import PinnedResolver, resolve_public_http_target
+from services.net_safety import PinnedResolver, ResolvedHttpTarget, resolve_public_http_target
+from services.subtitles import SubtitleProviderError, SubtitleService
 
 
 class RequestModelSecurityTests(unittest.TestCase):
@@ -42,6 +43,99 @@ class NetSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["host"], "1.1.1.1")
         with self.assertRaises(OSError):
             await resolver.resolve("different.example", 443)
+
+
+
+
+class _FakeResponse:
+    def __init__(self, status: int, headers: dict[str, str] | None = None):
+        self.status = status
+        self.headers = headers or {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeSession:
+    responses: list[_FakeResponse] = []
+    calls: list[dict] = []
+
+    def __init__(self, **kwargs):
+        self.headers = dict(kwargs.get("headers") or {})
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def get(self, url, **kwargs):
+        type(self).calls.append({
+            "url": url,
+            "headers": dict(self.headers),
+            "params": kwargs.get("params"),
+            "allow_redirects": kwargs.get("allow_redirects"),
+        })
+        return type(self).responses.pop(0)
+
+
+class SubtitleDownloadSecurityTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        _FakeSession.responses = []
+        _FakeSession.calls = []
+
+    async def test_subdl_private_redirect_is_rejected_before_second_request(self):
+        _FakeSession.responses = [_FakeResponse(302, {"Location": "https://127.0.0.1/private"})]
+        public = ResolvedHttpTarget(
+            "https://dl.subdl.com/file.srt", "https", "dl.subdl.com", 443, ("1.1.1.1",)
+        )
+        with patch("services.subtitles.resolve_public_http_target", new=AsyncMock(
+            side_effect=[public, ValueError("Download URL resolves to a non-public network address")]
+        )), patch("services.subtitles.pinned_connector", return_value=object()), patch(
+            "services.subtitles.aiohttp.ClientSession", _FakeSession
+        ):
+            with self.assertRaises(SubtitleProviderError):
+                await SubtitleService._download_subdl_file(
+                    "https://dl.subdl.com/file.srt",
+                    credential_headers={"x-api-key": "secret"},
+                    initial_params={"api_key": "secret"},
+                )
+        self.assertEqual(len(_FakeSession.calls), 1)
+        self.assertFalse(_FakeSession.calls[0]["allow_redirects"])
+
+    async def test_subdl_cross_origin_redirect_does_not_forward_credentials(self):
+        _FakeSession.responses = [
+            _FakeResponse(302, {"Location": "https://cdn.example/file.srt"}),
+            _FakeResponse(200, {"Content-Disposition": 'attachment; filename="file.srt"'}),
+        ]
+        targets = [
+            ResolvedHttpTarget(
+                "https://dl.subdl.com/file.srt", "https", "dl.subdl.com", 443, ("1.1.1.1",)
+            ),
+            ResolvedHttpTarget(
+                "https://cdn.example/file.srt", "https", "cdn.example", 443, ("8.8.8.8",)
+            ),
+        ]
+        with patch("services.subtitles.resolve_public_http_target", new=AsyncMock(side_effect=targets)), patch(
+            "services.subtitles.pinned_connector", return_value=object()
+        ), patch("services.subtitles.aiohttp.ClientSession", _FakeSession), patch(
+            "services.subtitles.read_response_limited", new=AsyncMock(return_value=b"subtitle")
+        ):
+            content, name = await SubtitleService._download_subdl_file(
+                "https://dl.subdl.com/file.srt",
+                credential_headers={"x-api-key": "secret"},
+                initial_params={"api_key": "secret"},
+            )
+        self.assertEqual(content, b"subtitle")
+        self.assertEqual(name, "file.srt")
+        self.assertEqual(_FakeSession.calls[0]["headers"].get("x-api-key"), "secret")
+        self.assertEqual(_FakeSession.calls[0]["params"], {"api_key": "secret"})
+        self.assertNotIn("x-api-key", _FakeSession.calls[1]["headers"] )
+        self.assertIsNone(_FakeSession.calls[1]["params"] )
+        self.assertFalse(_FakeSession.calls[1]["allow_redirects"])
 
 
 class RateLimitSecurityTests(unittest.TestCase):

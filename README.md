@@ -135,7 +135,7 @@ npm run package:win
 Output:
 
 ```text
-release\NetWatch-Setup-1.0.7.exe
+release\NetWatch-Setup-1.0.8.exe
 ```
 
 Use `npm ci` for reproducible builds. See [`packaging/PACKAGING.md`](packaging/PACKAGING.md) for Windows packaging details.

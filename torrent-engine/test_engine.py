@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -103,6 +105,20 @@ class TorrentEngineUnitTests(unittest.TestCase):
         )
         service._records = {record.info_hash: record}
         return service, record, handle
+
+
+    def test_save_path_is_engine_generated_not_hash_derived(self):
+        with tempfile.TemporaryDirectory() as root:
+            old_root = engine.DOWNLOAD_ROOT
+            engine.DOWNLOAD_ROOT = root
+            try:
+                with patch.object(engine.secrets, "token_hex", return_value="b" * 32):
+                    path = engine.TorrentEngine._create_save_path()
+                self.assertEqual(Path(path).name, "torrent-" + "b" * 32)
+                self.assertEqual(Path(path).parent, Path(root).resolve())
+                self.assertTrue(Path(path).is_dir())
+            finally:
+                engine.DOWNLOAD_ROOT = old_root
 
     def test_video_selection_prefers_largest_non_sample(self):
         files = [

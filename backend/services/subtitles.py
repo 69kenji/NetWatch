@@ -14,7 +14,7 @@ from urllib.parse import urljoin, urlparse
 import aiohttp
 
 from config import settings
-from services.net_safety import pinned_connector, read_response_limited, resolve_public_http_target
+from services.net_safety import authority_key, pinned_connector, read_response_limited, resolve_public_http_target
 
 OPENSUBTITLES_BASE = "https://api.opensubtitles.com/api/v1"
 SUBDL_BASE = "https://api.subdl.com/api/v2"
@@ -745,6 +745,78 @@ class SubtitleService:
         return content, remote_name
 
     @classmethod
+    async def _download_subdl_file(
+        cls,
+        initial_url: str,
+        *,
+        credential_headers: Optional[dict[str, str]] = None,
+        initial_params: Optional[dict[str, str]] = None,
+        fallback_name: Optional[str] = None,
+    ) -> tuple[bytes, Optional[str]]:
+        """Download a SubDL file without allowing redirects or DNS to bypass SSRF policy."""
+        current_url = str(initial_url or "").strip()
+        try:
+            credential_authority = authority_key(current_url)
+        except ValueError as exc:
+            raise SubtitleProviderError("subdl", f"Invalid SubDL download URL: {exc}") from exc
+
+        for hop in range(6):
+            try:
+                target = await resolve_public_http_target(current_url, require_https=True)
+            except ValueError as exc:
+                raise SubtitleProviderError("subdl", f"Unsafe subtitle download URL: {exc}") from exc
+
+            request_headers = {"User-Agent": USER_AGENT}
+            if authority_key(current_url) == credential_authority and credential_headers:
+                request_headers.update(credential_headers)
+            request_params = initial_params if hop == 0 else None
+
+            async with aiohttp.ClientSession(
+                timeout=cls._timeout(30),
+                headers=request_headers,
+                connector=pinned_connector(target),
+            ) as session:
+                # Each redirect hop is HTTPS-only, public-address validated, and DNS-pinned above.
+                # codeql[py/full-ssrf]
+                async with session.get(
+                    current_url,
+                    params=request_params,
+                    allow_redirects=False,
+                ) as response:
+                    if response.status in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise SubtitleProviderError(
+                                "subdl", "Subtitle download redirect did not include Location"
+                            )
+                        current_url = urljoin(current_url, location)
+                        continue
+                    if response.status != 200:
+                        raise SubtitleProviderError(
+                            "subdl",
+                            f"subtitle download returned HTTP {response.status}",
+                            response.status,
+                        )
+                    try:
+                        content = await read_response_limited(response, MAX_SUBTITLE_BYTES)
+                    except ValueError as exc:
+                        raise SubtitleProviderError(
+                            "subdl", "Downloaded subtitle exceeds the size limit"
+                        ) from exc
+                    disposition = response.headers.get("Content-Disposition", "")
+                    match = re.search(r'filename\*?=(?:UTF-8\'\')?["\']?([^"\';]+)', disposition, re.I)
+                    remote_name = (
+                        match.group(1).strip()
+                        if match
+                        else (fallback_name or PurePosixPath(urlparse(current_url).path).name)
+                    )
+                    if not content:
+                        raise SubtitleProviderError("subdl", "Downloaded subtitle was empty")
+                    return content, remote_name
+
+        raise SubtitleProviderError("subdl", "Subtitle download exceeded redirect limit")
+
+    @classmethod
     async def _download_subdl(cls, download_ref: str) -> tuple[bytes, Optional[str]]:
         headers = cls._subdl_headers() if cls._configured(settings.SUBDL_API_KEY) else {}
         download_ref = str(download_ref or "").strip()
@@ -774,28 +846,16 @@ class SubtitleService:
                 # inside the backend even when the CDN requires query auth.
                 request_params["api_key"] = settings.SUBDL_API_KEY
             try:
-                async with aiohttp.ClientSession(timeout=cls._timeout(30), headers=request_headers) as session:
-                    async with session.get(download_url, params=request_params) as response:
-                        if response.status != 200:
-                            raise SubtitleProviderError(
-                                "subdl",
-                                f"subtitle download returned HTTP {response.status}",
-                                response.status,
-                            )
-                        content = await read_response_limited(response, MAX_SUBTITLE_BYTES)
-                        disposition = response.headers.get("Content-Disposition", "")
-                        match = re.search(r'filename\*?=(?:UTF-8\'\')?["\']?([^"\';]+)', disposition, re.I)
-                        remote_name = match.group(1).strip() if match else PurePosixPath(provider_path).name
+                return await cls._download_subdl_file(
+                    download_url,
+                    credential_headers=request_headers,
+                    initial_params=request_params,
+                    fallback_name=PurePosixPath(provider_path).name,
+                )
             except SubtitleProviderError:
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
                 raise SubtitleProviderError("subdl", str(exc)) from exc
-
-            if not content:
-                raise SubtitleProviderError("subdl", "Downloaded subtitle was empty")
-            if len(content) > MAX_SUBTITLE_BYTES:
-                raise SubtitleProviderError("subdl", "Downloaded subtitle exceeds the size limit")
-            return content, remote_name
 
         # If a result only exposes its nId, resolve it through the authenticated
         # v2 download API.
@@ -856,28 +916,15 @@ class SubtitleService:
             download_headers["x-api-key"] = settings.SUBDL_API_KEY
 
         try:
-            async with aiohttp.ClientSession(timeout=cls._timeout(30), headers=download_headers) as session:
-                async with session.get(download_ref) as response:
-                    if response.status != 200:
-                        raise SubtitleProviderError(
-                            "subdl",
-                            f"subtitle download returned HTTP {response.status}",
-                            response.status,
-                        )
-                    content = await read_response_limited(response, MAX_SUBTITLE_BYTES)
-                    disposition = response.headers.get("Content-Disposition", "")
-                    match = re.search(r'filename\*?=(?:UTF-8\'\')?["\']?([^"\';]+)', disposition, re.I)
-                    remote_name = match.group(1).strip() if match else PurePosixPath(parsed.path).name
+            return await cls._download_subdl_file(
+                download_ref,
+                credential_headers=download_headers,
+                fallback_name=PurePosixPath(parsed.path).name,
+            )
         except SubtitleProviderError:
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             raise SubtitleProviderError("subdl", str(exc)) from exc
-
-        if not content:
-            raise SubtitleProviderError("subdl", "Downloaded subtitle was empty")
-        if len(content) > MAX_SUBTITLE_BYTES:
-            raise SubtitleProviderError("subdl", "Downloaded subtitle exceeds the size limit")
-        return content, remote_name
 
     @classmethod
     def _normalize_downloaded_content(

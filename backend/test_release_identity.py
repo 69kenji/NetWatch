@@ -6,11 +6,20 @@ from routes.metadata import (
     _movie_payload,
     _movie_release_identity_matches,
     _series_release_identity_matches,
+    _regex_decimal,
     episode_stream_options,
 )
 
 
 class ReleaseIdentityTests(unittest.IsolatedAsyncioTestCase):
+
+    def test_episode_regex_tokens_reject_non_integer_or_out_of_range_values(self):
+        with self.assertRaises(ValueError):
+            _regex_decimal("1.*")
+        with self.assertRaises(ValueError):
+            _regex_decimal(10000)
+        self.assertEqual(_regex_decimal(12), "12")
+
     def test_obsession_series_accepts_exact_identity(self):
         self.assertTrue(_series_release_identity_matches(
             "Obsession.2023.S01E01.1080p.WEB-DL.x265",

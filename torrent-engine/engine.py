@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+import secrets
 import shutil
 import threading
 import time
@@ -255,13 +256,21 @@ class TorrentEngine:
         raise TorrentEngineError("libtorrent did not expose a usable info hash")
 
     @staticmethod
-    def _safe_save_path(info_hash: str) -> str:
-        candidate = os.path.realpath(os.path.join(DOWNLOAD_ROOT, info_hash))
-        if os.path.commonpath([DOWNLOAD_ROOT, candidate]) != DOWNLOAD_ROOT:
-            raise TorrentEngineError("unsafe torrent save path")
-        if candidate == DOWNLOAD_ROOT:
-            raise TorrentEngineError("torrent save path cannot equal download root")
-        return candidate
+    def _create_save_path() -> str:
+        """Create an engine-owned payload directory with no request-derived path component."""
+        root = os.path.realpath(DOWNLOAD_ROOT)
+        for _ in range(16):
+            candidate = os.path.join(root, f"torrent-{secrets.token_hex(16)}")
+            try:
+                os.mkdir(candidate, 0o700)
+            except FileExistsError:
+                continue
+            resolved = os.path.realpath(candidate)
+            if os.path.commonpath([root, resolved]) != root or resolved == root:
+                shutil.rmtree(resolved, ignore_errors=True)
+                raise TorrentEngineError("unsafe torrent save path")
+            return resolved
+        raise TorrentEngineError("could not allocate torrent save path")
 
     @staticmethod
     def _set_add_flags(params: Any) -> None:
@@ -308,8 +317,7 @@ class TorrentEngine:
                     "engine": "libtorrent",
                 }
 
-            save_path = self._safe_save_path(requested_hash)
-            Path(save_path).mkdir(parents=True, exist_ok=True)
+            save_path = self._create_save_path()
             params.save_path = save_path
             try:
                 params.upload_limit = UPLOAD_LIMIT

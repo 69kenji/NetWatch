@@ -49,6 +49,15 @@ class PlayerArtworkTests(unittest.TestCase):
 
 
 class PlayerArtworkRequestTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_image_filename_validation_is_bounded_and_regex_free_at_boundary(self):
+        with self.assertRaises(ValueError):
+            await MetadataService.fetch_image("w500", "x" * 256 + ".jpg")
+        with self.assertRaises(ValueError):
+            await MetadataService.fetch_image("w500", "../poster.jpg")
+        with self.assertRaises(ValueError):
+            await MetadataService.fetch_image("w500", "poster.svg")
+
     async def test_movie_details_request_appends_images_for_player_artwork(self):
         payload = {
             "id": 10,

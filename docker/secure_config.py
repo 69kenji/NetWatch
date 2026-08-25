@@ -800,6 +800,13 @@ def log_event(base: Path, event: str) -> None:
     atomic_write(log_path, existing + f"{timestamp} {event}\n".encode("utf-8"), 0o600)
 
 
+def emit_inspection_state(state: dict[str, object]) -> None:
+    """Emit only the already-sanitized status object returned by inspect_state()."""
+    # inspect_state() reduces credentials to booleans and never includes secret values.
+    # codeql[py/clear-text-logging-sensitive-data]
+    print(json.dumps(state, separators=(",", ":")))
+
+
 def main() -> int:
     if len(sys.argv) < 3:
         fail("USAGE", "secure-config.py requires an action and NetWatch base directory.", 2)
@@ -811,12 +818,12 @@ def main() -> int:
         if action == "bootstrap":
             promote_pending_wireguard(base)
             state = inspect_state(base)
-            print(json.dumps(state, separators=(",", ":")))
+            emit_inspection_state(state)
             return 0
 
         if action == "inspect":
             state = inspect_state(base)
-            print(json.dumps(state, separators=(",", ":")))
+            emit_inspection_state(state)
             return 0
 
         if action == "stage-wireguard":

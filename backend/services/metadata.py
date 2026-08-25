@@ -184,10 +184,17 @@ class MetadataService:
         """Fetch a TMDB image through the backend's VPN-routed network namespace."""
         if size not in TMDB_IMAGE_SIZES:
             raise ValueError("unsupported TMDB image size")
-        if not re.fullmatch(r"[A-Za-z0-9._-]+\.(?:jpg|jpeg|png|webp)", filename, re.I):
+        normalized_name = str(filename or "")
+        if not normalized_name or len(normalized_name) > 255:
+            raise ValueError("invalid TMDB image filename")
+        allowed_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        if any(ch not in allowed_chars for ch in normalized_name):
+            raise ValueError("invalid TMDB image filename")
+        stem, separator, extension = normalized_name.rpartition(".")
+        if not separator or not stem or extension.lower() not in {"jpg", "jpeg", "png", "webp"}:
             raise ValueError("invalid TMDB image filename")
 
-        url = f"{TMDB_IMAGE}/{size}/{filename}"
+        url = f"{TMDB_IMAGE}/{size}/{normalized_name}"
         timeout = aiohttp.ClientTimeout(total=max(12.0, settings.DEPENDENCY_TIMEOUT_SECS))
         try:
             async with aiohttp.ClientSession(timeout=timeout, headers={"Accept": "image/*"}) as session:
