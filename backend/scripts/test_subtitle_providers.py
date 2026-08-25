@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Read-only subtitle provider smoke test against a running NetWatch backend.
 
-By default this validates credentials and searches both providers without consuming
-subtitle download quota. Pass --download to fetch one subtitle from each provider,
-verify the local ephemeral file endpoint, then delete it again.
+Configured online subtitle providers are validated and searched without consuming
+download quota. Unconfigured optional providers are skipped. Pass --download to
+fetch one subtitle from each configured provider with results, verify the local
+ephemeral file endpoint, then delete it again.
 """
 
 import argparse
@@ -38,12 +39,21 @@ def main() -> int:
     _, _, body = request("GET", "/api/subtitles/providers")
     providers = json.loads(body)
     print("Provider validation:")
+    configured_providers = []
     for name in ("opensubtitles", "subdl"):
         state = providers.get(name) or {}
-        print(f"  {name:14} status={state.get('status')} connected={state.get('connected')} authenticated={state.get('authenticated')}")
+        configured = bool(state.get("configured"))
+        print(f"  {name:14} status={state.get('status')} configured={configured} connected={state.get('connected')} authenticated={state.get('authenticated')}")
+        if not configured:
+            continue
+        configured_providers.append(name)
         if not state.get("connected"):
             print(f"    error={state.get('error')}")
             return 1
+
+    if not configured_providers:
+        print("SKIP: no online subtitle providers are configured")
+        return 0
 
     query = urllib.parse.urlencode({
         "imdb_id": args.imdb_id,
@@ -63,6 +73,12 @@ def main() -> int:
     print("Search validation:")
     for name, count in counts.items():
         state = (search.get("providers") or {}).get(name) or {}
+        if name not in configured_providers:
+            if state.get("status") != "not_configured":
+                print(f"FAIL: {name} is unconfigured but returned status={state.get('status')}")
+                return 1
+            print(f"  {name:14} status=not_configured (skipped)")
+            continue
         extra = ""
         if name == "subdl":
             strategies = sorted({str(row.get("match_strategy")) for row in results if row.get("source") == "subdl" and row.get("match_strategy")})
@@ -87,10 +103,10 @@ def main() -> int:
         return 1
 
     if not args.download:
-        print("PASS: both subtitle providers authenticated and searched successfully")
+        print("PASS: configured subtitle providers authenticated and searched successfully")
         return 0
 
-    for provider in ("subdl", "opensubtitles"):
+    for provider in configured_providers:
         candidate = next((row for row in results if row.get("source") == provider), None)
         if not candidate:
             print(f"FAIL: no {provider} result available to download")
@@ -117,7 +133,7 @@ def main() -> int:
         finally:
             request("DELETE", f"/api/subtitles/file/{urllib.parse.quote(token, safe='')}")
 
-    print("PASS: both subtitle providers searched and downloaded successfully")
+    print("PASS: configured subtitle providers searched and downloaded successfully")
     return 0
 
 

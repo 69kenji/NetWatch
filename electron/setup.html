@@ -79,15 +79,18 @@
         <div class="api-list" id="apiFields">
           <div class="api-row field" data-key="tmdb">
             <div class="api-label"><label for="tmdb">TMDB</label><button class="text-action" data-site="tmdb">Get key</button></div>
-            <input id="tmdb" type="password" autocomplete="off" spellcheck="false" maxlength="256" placeholder="API key">
+            <input id="tmdb" type="password" autocomplete="off" spellcheck="false" maxlength="32" placeholder="32-character API key">
+            <div class="credential-hint"><span>Required</span><span id="tmdbCount">0 / 32</span></div>
           </div>
           <div class="api-row field" data-key="opensubtitles">
-            <div class="api-label"><label for="opensubtitles">OpenSubtitles</label><button class="text-action" data-site="opensubtitles">Get key</button></div>
-            <input id="opensubtitles" type="password" autocomplete="off" spellcheck="false" maxlength="256" placeholder="API key">
+            <div class="api-label"><label for="opensubtitles">OpenSubtitles <span class="optional-label">Optional</span></label><button class="text-action" data-site="opensubtitles">Get key</button></div>
+            <input id="opensubtitles" type="password" autocomplete="off" spellcheck="false" maxlength="32" placeholder="32-character API key">
+            <div class="credential-hint"><span>Can be added later in Settings</span><span id="opensubtitlesCount">0 / 32</span></div>
           </div>
           <div class="api-row field" data-key="subdl">
-            <div class="api-label"><label for="subdl">SubDL</label><button class="text-action" data-site="subdl">Get key</button></div>
-            <input id="subdl" type="password" autocomplete="off" spellcheck="false" maxlength="256" placeholder="API key">
+            <div class="api-label"><label for="subdl">SubDL <span class="optional-label">Optional</span></label><button class="text-action" data-site="subdl">Get key</button></div>
+            <div class="prefixed-secret-input"><span>subdl_</span><input id="subdl" type="password" autocomplete="off" spellcheck="false" maxlength="43" placeholder="43 characters after subdl_"></div>
+            <div class="credential-hint"><span>Paste only what comes after subdl_</span><span id="subdlCount">0 / 43</span></div>
           </div>
         </div>
 

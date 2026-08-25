@@ -63,18 +63,18 @@ class SubtitleService:
         return aiohttp.ClientTimeout(total=seconds)
 
     @classmethod
-    def _opensubtitles_headers(cls) -> dict[str, str]:
+    def _opensubtitles_headers(cls, api_key: Optional[str] = None) -> dict[str, str]:
         return {
             "Accept": "application/json",
-            "Api-Key": settings.OPENSUBTITLES_API_KEY,
+            "Api-Key": api_key if api_key is not None else settings.OPENSUBTITLES_API_KEY,
             "User-Agent": USER_AGENT,
         }
 
     @classmethod
-    def _subdl_headers(cls) -> dict[str, str]:
+    def _subdl_headers(cls, api_key: Optional[str] = None) -> dict[str, str]:
         return {
             "Accept": "application/json",
-            "Authorization": f"Bearer {settings.SUBDL_API_KEY}",
+            "Authorization": f"Bearer {api_key if api_key is not None else settings.SUBDL_API_KEY}",
             "User-Agent": USER_AGENT,
         }
 
@@ -136,20 +136,21 @@ class SubtitleService:
         }
 
     @classmethod
-    async def _health_opensubtitles(cls) -> dict:
+    async def _health_opensubtitles(cls, api_key: Optional[str] = None) -> dict:
+        key = settings.OPENSUBTITLES_API_KEY if api_key is None else api_key
         result = {
             "provider": "opensubtitles",
-            "configured": cls._configured(settings.OPENSUBTITLES_API_KEY),
+            "configured": cls._configured(key),
             "connected": False,
             "authenticated": False,
         }
         if not result["configured"]:
-            result.update(status="misconfigured", error="OPENSUBTITLES_API_KEY is not configured")
+            result.update(status="not_configured", error=None)
             return result
 
         try:
             async with aiohttp.ClientSession(
-                timeout=cls._timeout(12), headers=cls._opensubtitles_headers()
+                timeout=cls._timeout(12), headers=cls._opensubtitles_headers(key)
             ) as session:
                 # A real /subtitles search validates the application API key while
                 # consuming no download quota. Static /infos endpoints may be public
@@ -172,20 +173,21 @@ class SubtitleService:
             return result
 
     @classmethod
-    async def _health_subdl(cls) -> dict:
+    async def _health_subdl(cls, api_key: Optional[str] = None) -> dict:
+        key = settings.SUBDL_API_KEY if api_key is None else api_key
         result = {
             "provider": "subdl",
-            "configured": cls._configured(settings.SUBDL_API_KEY),
+            "configured": cls._configured(key),
             "connected": False,
             "authenticated": False,
         }
         if not result["configured"]:
-            result.update(status="misconfigured", error="SUBDL_API_KEY is not configured")
+            result.update(status="not_configured", error=None)
             return result
 
         try:
             async with aiohttp.ClientSession(
-                timeout=cls._timeout(12), headers=cls._subdl_headers()
+                timeout=cls._timeout(12), headers=cls._subdl_headers(key)
             ) as session:
                 async with session.get(f"{SUBDL_BASE}/me") as response:
                     payload = await response.json(content_type=None)
@@ -205,6 +207,15 @@ class SubtitleService:
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             result.update(status="unavailable", error=str(exc))
             return result
+
+    @classmethod
+    async def validate_candidate(cls, provider: str, api_key: str) -> dict:
+        """Validate a transient Settings credential without reading or mutating stored keys."""
+        if provider == "opensubtitles":
+            return await cls._health_opensubtitles(api_key)
+        if provider == "subdl":
+            return await cls._health_subdl(api_key)
+        raise ValueError("Unsupported subtitle provider")
 
     @classmethod
     async def search(
@@ -249,13 +260,28 @@ class SubtitleService:
                 provider_status[name] = {"status": "error", "connected": False, "error": str(exc)}
                 return []
 
-        open_task = asyncio.create_task(run_provider(
+        async def run_configured_provider(name: str, configured: bool, coro_factory):
+            if not configured:
+                provider_status[name] = {
+                    "status": "not_configured",
+                    "configured": False,
+                    "connected": False,
+                    "count": 0,
+                }
+                return []
+            rows = await run_provider(name, coro_factory())
+            provider_status[name]["configured"] = True
+            return rows
+
+        open_task = asyncio.create_task(run_configured_provider(
             "opensubtitles",
-            cls._search_opensubtitles(normalized_imdb, query, file_name, languages, season, episode),
+            cls._configured(settings.OPENSUBTITLES_API_KEY),
+            lambda: cls._search_opensubtitles(normalized_imdb, query, file_name, languages, season, episode),
         ))
-        subdl_task = asyncio.create_task(run_provider(
+        subdl_task = asyncio.create_task(run_configured_provider(
             "subdl",
-            cls._search_subdl(normalized_imdb, query, file_name, languages, season, episode),
+            cls._configured(settings.SUBDL_API_KEY),
+            lambda: cls._search_subdl(normalized_imdb, query, file_name, languages, season, episode),
         ))
         open_rows, subdl_rows = await asyncio.gather(open_task, subdl_task)
 

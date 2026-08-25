@@ -80,10 +80,10 @@ You will need:
 - WSL2 and a normal Linux distribution; Ubuntu is recommended.
 - Docker Desktop using the WSL2 backend and integrated with that distribution.
 - A full-tunnel WireGuard client configuration. Generic providers and VPNBook profiles are supported.
-- TMDB, OpenSubtitles, and SubDL API keys.
+- A TMDB API key. OpenSubtitles and SubDL API keys are optional and can be added later in Settings.
 - Prowlarr with at least one usable indexer and its API key.
 
-The Windows installer can guide you through installing or enabling WSL, Ubuntu, and Docker Desktop when needed. Launch Setup normally; do not use **Run as administrator**. NetWatch 1.0.5 uses a fixed-purpose native prerequisite helper rather than PowerShell for these setup actions. Only the explicit WSL feature/package action requests UAC; Ubuntu and Docker remain current-user steps.
+The Windows installer can guide you through installing or enabling WSL, Ubuntu, and Docker Desktop when needed. Launch Setup normally; do not use **Run as administrator**. NetWatch 1.0.6 uses a fixed-purpose native prerequisite helper rather than PowerShell for these setup actions. Only the explicit WSL feature/package action requests UAC; Ubuntu and Docker remain current-user steps.
 
 If endpoint security interrupts prerequisite setup, NetWatch stops waiting when the helper heartbeat disappears and reports the interruption instead of treating a partial install as ready. Allow any trusted Microsoft/Ubuntu/Docker setup process already running to finish, then use **Refresh checks** or the official manual setup links. Do not globally allow-list `powershell.exe` or disable endpoint protection just for NetWatch.
 
@@ -97,8 +97,8 @@ The packaged setup flow is:
 
 1. Select **Generic WireGuard** or **VPNBook**, then import a provider `.conf`.
 2. Verify the inner VPN, kill switch, DNS path, and real egress.
-3. Enter and validate TMDB, OpenSubtitles, and SubDL API keys.
-4. Configure Prowlarr and enter its API key.
+3. Enter and validate the required TMDB API key. OpenSubtitles and SubDL may be skipped and added later in Settings.
+4. Configure Prowlarr and enter its required API key.
 5. Start NetWatch normally.
 
 NetWatch rewrites the imported WireGuard configuration into its own canonical form. Provider command hooks are rejected, a full IPv4 tunnel (`0.0.0.0/0`) is required, and the VPN configuration must provide a usable IPv4 DNS resolver.
@@ -131,6 +131,10 @@ Packaged state lives under:
 ```
 
 `config/` and `data/` are preserved across normal reinstall/upgrade and are not removed by a normal NetWatch uninstall. Torrent playback data is ephemeral.
+
+### 1.0.6 credential setup
+
+First launch requires WireGuard, a 32-character TMDB API key, and a 32-character Prowlarr API key. OpenSubtitles and SubDL are optional; they can be added or replaced later in Settings without exposing saved key values to the renderer. OpenSubtitles keys are exactly 32 characters. SubDL keys are stored as `subdl_` followed by exactly 43 characters; NetWatch shows the fixed `subdl_` prefix and asks users to paste only the suffix. Upgrading from 1.0.5 preserves existing provider credentials, and missing optional subtitle credentials do not reopen first-run onboarding.
 
 ### Upgrading from 1.0.4 to 1.0.5
 
@@ -174,7 +178,7 @@ npm run package:win
 The release artifact is written as:
 
 ```text
-release\NetWatch-Setup-1.0.5.exe
+release\NetWatch-Setup-1.0.6.exe
 ```
 
 Use `npm ci` for reproducible builds. Do not replace it with `npm install` and do not use `npm audit fix --force`.

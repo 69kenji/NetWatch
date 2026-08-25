@@ -9,6 +9,7 @@ const apiStep = el('apiStep')
 const doneStep = el('doneStep')
 const stageVpn = el('stageVpn')
 const stageApi = el('stageApi')
+const API_LENGTHS = { tmdb: 32, opensubtitles: 32, subdl: 43 }
 
 function setBusy(busy, text = '') {
   state.busy = busy
@@ -34,6 +35,34 @@ function setMessage(text, kind = '') {
 
 function clearInputs() {
   for (const id of ['tmdb', 'opensubtitles', 'subdl']) el(id).value = ''
+}
+
+function normalizedInput(name) {
+  return (el(name).value || '').trim()
+}
+
+function updateCredentialCounters() {
+  for (const [name, length] of Object.entries(API_LENGTHS)) {
+    const counter = el(`${name}Count`)
+    if (counter) counter.textContent = `${normalizedInput(name).length} / ${length}`
+  }
+}
+
+function apiInputState(configured = state.current?.env?.configured || {}) {
+  const tmdb = configured.tmdb ? '' : normalizedInput('tmdb')
+  const opensubtitles = configured.opensubtitles ? '' : normalizedInput('opensubtitles')
+  const subdl = configured.subdl ? '' : normalizedInput('subdl')
+  const tmdbValid = Boolean(configured.tmdb || tmdb.length === 32)
+  const openValid = Boolean(configured.opensubtitles || opensubtitles.length === 0 || opensubtitles.length === 32)
+  const subdlValid = Boolean(configured.subdl || subdl.length === 0 || subdl.length === 43)
+  return { valid: tmdbValid && openValid && subdlValid, tmdb, opensubtitles, subdl }
+}
+
+function updateApiControls() {
+  updateCredentialCounters()
+  if (!state.current || state.busy) return
+  const configured = state.current?.env?.configured || {}
+  el('saveApi').disabled = !apiInputState(configured).valid
 }
 
 function renderVpnProfile(profile = {}) {
@@ -70,6 +99,7 @@ function renderApiFields(configured = {}) {
       if (badge) badge.remove()
     }
   }
+  updateApiControls()
 }
 
 function setStage(name) {
@@ -105,7 +135,7 @@ function render(next) {
     return
   }
 
-  const apiComplete = configured.tmdb && configured.opensubtitles && configured.subdl
+  const apiComplete = configured.tmdb
   if (!apiComplete) {
     setStage('api')
     renderApiFields(configured)
@@ -193,16 +223,27 @@ async function verifyVpn() {
 async function saveApi() {
   if (state.busy) return
   const configured = state.current?.env?.configured || {}
+  const inputState = apiInputState(configured)
+  if (!inputState.valid) {
+    setMessage('TMDB requires 32 characters. Optional subtitle keys must be blank or complete.', 'error')
+    return
+  }
   const payload = {}
-  for (const name of ['tmdb', 'opensubtitles', 'subdl']) {
-    if (!configured[name]) payload[name] = el(name).value
+  if (!configured.tmdb) payload.tmdb = inputState.tmdb
+  if (!configured.opensubtitles && inputState.opensubtitles) payload.opensubtitles = inputState.opensubtitles
+  if (!configured.subdl && inputState.subdl) {
+    if (inputState.subdl.startsWith('subdl_')) {
+      setMessage('For SubDL, paste only the 43 characters after subdl_.', 'error')
+      return
+    }
+    payload.subdl = `subdl_${inputState.subdl}`
   }
   setBusy(true, 'Validating API keys…')
   let notice = { text: '', kind: '' }
   try {
     const result = await window.netwatchSetup.submitApiCredentials(payload)
     state.current = result.state || state.current
-    notice = { text: 'API keys verified.', kind: 'success' }
+    notice = { text: 'Credentials verified.', kind: 'success' }
   } catch (error) {
     notice = { text: error?.message || 'API credential validation failed.', kind: 'error' }
   } finally {
@@ -210,6 +251,11 @@ async function saveApi() {
     for (const key of Object.keys(payload)) payload[key] = ''
     finishBusy(notice.text, notice.kind)
   }
+}
+
+for (const name of ['tmdb', 'opensubtitles', 'subdl']) {
+  el(name).addEventListener('input', updateApiControls)
+  el(name).addEventListener('paste', () => setTimeout(updateApiControls, 0))
 }
 
 el('vpnProfileType').addEventListener('change', () => { void changeVpnProfileType() })

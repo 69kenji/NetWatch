@@ -26,10 +26,10 @@ Then build the installer:
 npm run package:win
 ```
 
-For 1.0.5 the installer is:
+For 1.0.6 the installer is:
 
 ```text
-release\NetWatch-Setup-1.0.5.exe
+release\NetWatch-Setup-1.0.6.exe
 ```
 
 ## Player process model
@@ -58,6 +58,14 @@ The Docker Desktop installer is fetched only from Docker's official `desktop.doc
 
 The Windows package must not contain API keys, a private WireGuard configuration, Prowlarr state, or provider credentials.
 
+For canonical source archives, generate the checksum with:
+
+```powershell
+npm run checksum:file -- .\netwatch-1.0.6.zip
+```
+
+The `.sha256` file must contain the archive basename only (`netwatch-1.0.6.zip`), never an absolute build-machine path.
+
 Packaged state is kept in WSL:
 
 ```text
@@ -85,7 +93,7 @@ Before publishing an installer:
 
 1. Build from a clean NTFS checkout with `npm ci`.
 2. Test the unpacked application.
-3. Build and test `NetWatch-Setup-1.0.5.exe` through install/reinstall/uninstall/reinstall, including interrupted prerequisite recovery.
+3. Build and test `NetWatch-Setup-1.0.6.exe` through install/reinstall/uninstall/reinstall, including interrupted prerequisite recovery.
 4. Confirm expected WSL private state survives normal uninstall/reinstall.
 5. Confirm installed resources contain the license/notices, mpv provenance, and `native/netwatch-surface-helper.exe`; no obsolete player launcher helper should be present. The prerequisite helper is installer-only and must not remain in the installed application resources.
 6. Hash the source ZIP and installer.

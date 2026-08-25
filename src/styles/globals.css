@@ -2613,3 +2613,82 @@ body, button, input, select, textarea {
   .nw-vpn-profile-actions { width: 100%; }
   .nw-vpn-profile-actions .btn { flex: 1 1 160px; }
 }
+
+/* Provider credential status/management. Active secret values never enter the renderer. */
+.nw-credentials-panel {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 12px;
+}
+.nw-credentials-panel__header { display: flex; flex-direction: column; gap: 4px; }
+.nw-credentials-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid rgba(255,255,255,0.055);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.nw-credential-group { display: flex; flex-direction: column; background: rgba(255,255,255,0.012); }
+.nw-credential-row {
+  min-height: 50px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.012);
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.nw-credentials-list > .nw-credential-row:last-child,
+.nw-credential-group:last-child > .nw-credential-row { border-bottom: 0; }
+.nw-credential-row > div:first-child { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.nw-credential-row strong { font-size: 10px; color: #c9c4d5; }
+.nw-credential-row small { color: #5f5a68; font-size: 8px; }
+.nw-credential-row__actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }
+.nw-credential-status { color: #746f7d; font-size: 9px; font-weight: 600; white-space: nowrap; }
+.nw-credential-status.is-configured { color: #7fc79e; }
+.nw-credential-editor {
+  padding: 11px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  background: rgba(0,0,0,0.09);
+}
+.nw-credential-editor label { display: flex; flex-direction: column; gap: 6px; color: #77717f; font-size: 9px; }
+.nw-credential-editor input[type="password"] {
+  width: 100%;
+  height: 34px;
+  box-sizing: border-box;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 7px;
+  background: #0b0b12;
+  color: #d5d0de;
+  padding: 0 10px;
+  outline: none;
+  font: inherit;
+  font-size: 10px;
+}
+.nw-credential-editor input[type="password"]:focus { border-color: rgba(123,97,255,0.48); }
+.nw-credential-prefixed-input {
+  display: flex;
+  align-items: center;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 7px;
+  background: #0b0b12;
+  overflow: hidden;
+}
+.nw-credential-prefixed-input:focus-within { border-color: rgba(123,97,255,0.48); }
+.nw-credential-prefixed-input > span { padding-left: 10px; color: #8c8696; font-size: 10px; user-select: none; }
+.nw-credential-prefixed-input input[type="password"] { border: 0; border-radius: 0; padding-left: 2px; }
+.nw-credential-editor__footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.nw-credential-editor__footer > small { color: #5f5a68; font-size: 8px; }
+.nw-credential-editor__footer > div { display: flex; gap: 7px; }
+.nw-credential-error { color: #d98089 !important; font-size: 9px !important; line-height: 1.45; }
+.nw-tmdb-attribution { color: #55515e !important; font-size: 8px !important; }
+@media (max-width: 680px) {
+  .nw-credential-row { align-items: flex-start; flex-direction: column; }
+  .nw-credential-row__actions { width: 100%; justify-content: flex-start; }
+  .nw-credential-editor__footer { align-items: flex-start; flex-direction: column; }
+}

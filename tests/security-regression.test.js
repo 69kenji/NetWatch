@@ -67,9 +67,9 @@ test('VPN hooks and verifiers enforce exact control-port and kill-switch rules',
 
 
 
-test('1.0.5 packaged runtime forces an upgrade from the released 1.0.4 runtime', () => {
-  assert.equal(runtimeVersion, '1.0.5-pkg38')
-  assert.notEqual(runtimeVersion, '1.0.4-pkg37')
+test('1.0.6 packaged runtime forces an upgrade from the released 1.0.5 runtime', () => {
+  assert.equal(runtimeVersion, '1.0.6-pkg39')
+  assert.notEqual(runtimeVersion, '1.0.5-pkg38')
   assert.match(main, /currentRuntimeVersion !== expectedRuntimeVersion/)
   assert.match(main, /packagedRuntimeUpdated = true/)
   assert.match(main, /upArgs\.push\('--build'\)/)

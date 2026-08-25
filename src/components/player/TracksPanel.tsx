@@ -21,6 +21,7 @@ interface Props {
 
 type ProviderState = {
   status?: string
+  configured?: boolean
   connected?: boolean
   authenticated?: boolean
   error?: string
@@ -86,6 +87,7 @@ export function TracksPanel({ mediaItem, mediaTitle, filePath, tracks = [], acti
   const delay = player.subtitleDelay || 0
   const audioTracks = tracks.filter(track => track.type === 'audio' && track.id != null)
   const embeddedTracks = tracks.filter(track => track.type === 'sub' && track.id != null && !track.external)
+  const onlineProvidersConfigured = Boolean(providers.opensubtitles?.configured || providers.subdl?.configured)
 
   useEffect(() => {
     let mounted = true
@@ -356,7 +358,11 @@ export function TracksPanel({ mediaItem, mediaTitle, filePath, tracks = [], acti
             </div>
           )}
 
-          {!loading && canSearch && subtitles.length === 0 && !error && (
+          {!loading && canSearch && subtitles.length === 0 && !error && !onlineProvidersConfigured && (
+            <div className="subtitle-panel__empty">Online subtitles are not configured. Add OpenSubtitles or SubDL in Settings.</div>
+          )}
+
+          {!loading && canSearch && subtitles.length === 0 && !error && onlineProvidersConfigured && (
             <div className="subtitle-panel__empty">No {languageLabel(selectedLang)} subtitles.</div>
           )}
 

@@ -8,6 +8,9 @@ type Props = {
   onOpenDiagnostics: () => void
 }
 
+type SubtitleCredentialProvider = 'opensubtitles' | 'subdl'
+
+
 function vpnBookRemaining(expiresAt: string | null | undefined, nowMs: number) {
   if (!expiresAt) return null
   const expiryMs = Date.parse(expiresAt)
@@ -34,6 +37,11 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
   const [vpnProfileError, setVpnProfileError] = useState<string | null>(null)
   const [vpnRestartRequired, setVpnRestartRequired] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
+  const [credentialStatus, setCredentialStatus] = useState<NetWatchCredentialStatus | null>(null)
+  const [credentialBusy, setCredentialBusy] = useState<SubtitleCredentialProvider | null>(null)
+  const [credentialError, setCredentialError] = useState<string | null>(null)
+  const [editingCredential, setEditingCredential] = useState<SubtitleCredentialProvider | null>(null)
+  const [credentialDraft, setCredentialDraft] = useState('')
 
   useEffect(() => {
     let active = true
@@ -48,6 +56,22 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
         }
       } catch (error) {
         if (active) setVpnProfileError(error instanceof Error ? error.message : String(error))
+      }
+    }
+    void load()
+    return () => { active = false }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    const load = async () => {
+      try {
+        const api = window.electron?.runtime
+        if (!api?.getCredentialStatus) return
+        const status = await api.getCredentialStatus()
+        if (active) setCredentialStatus(status)
+      } catch (error) {
+        if (active) setCredentialError(error instanceof Error ? error.message : String(error))
       }
     }
     void load()
@@ -128,6 +152,68 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
     } catch (error) {
       setVpnProfileError(error instanceof Error ? error.message : String(error))
       setVpnProfileBusy(false)
+    }
+  }
+
+  const beginCredentialEdit = (provider: SubtitleCredentialProvider) => {
+    setCredentialError(null)
+    setCredentialDraft('')
+    setEditingCredential(provider)
+  }
+
+  const cancelCredentialEdit = () => {
+    setCredentialDraft('')
+    setEditingCredential(null)
+    setCredentialError(null)
+  }
+
+  const openCredentialSite = async (provider: SubtitleCredentialProvider) => {
+    setCredentialError(null)
+    try {
+      const api = window.electron?.runtime
+      if (!api?.openCredentialSite) throw new Error('Credential links are unavailable in this build.')
+      await api.openCredentialSite(provider)
+    } catch (error) {
+      setCredentialError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const saveSubtitleCredential = async () => {
+    const provider = editingCredential
+    if (!provider || credentialBusy) return
+    const raw = credentialDraft.trim()
+    let candidate = raw
+    if (provider === 'opensubtitles') {
+      if (raw.length !== 32) {
+        setCredentialError('OpenSubtitles API key must be exactly 32 characters.')
+        return
+      }
+    } else {
+      if (raw.startsWith('subdl_')) {
+        setCredentialError('Paste only the 43 characters after subdl_.')
+        return
+      }
+      if (raw.length !== 43) {
+        setCredentialError('SubDL requires exactly 43 characters after subdl_.')
+        return
+      }
+      candidate = `subdl_${raw}`
+    }
+
+    setCredentialBusy(provider)
+    setCredentialError(null)
+    try {
+      const api = window.electron?.runtime
+      if (!api?.setSubtitleCredential) throw new Error('Credential management is unavailable in this build.')
+      const status = await api.setSubtitleCredential(provider, candidate)
+      setCredentialStatus(status)
+      setEditingCredential(null)
+    } catch (error) {
+      setCredentialError(error instanceof Error ? error.message : String(error))
+    } finally {
+      candidate = ''
+      setCredentialDraft('')
+      setCredentialBusy(null)
     }
   }
 
@@ -253,12 +339,87 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
         </button>
       </section>
 
-      <section className="nw-settings-runtime nw-settings-runtime--tmdb">
-        <div>
-          <span className="nw-settings-label">Metadata</span>
-          <strong>TMDB</strong>
-          <p>This product uses the TMDB API but is not endorsed or certified by TMDB.</p>
+      <section className="nw-settings-runtime nw-credentials-panel">
+        <div className="nw-credentials-panel__header">
+          <span className="nw-settings-label">Credentials</span>
+          <strong>Provider access</strong>
+          <p>NetWatch shows configuration status only. Saved API keys are never displayed.</p>
         </div>
+
+        <div className="nw-credentials-list">
+          <div className="nw-credential-row">
+            <div><strong>TMDB</strong><small>Required · Metadata</small></div>
+            <span className={`nw-credential-status ${credentialStatus?.tmdb ? 'is-configured' : ''}`}>{credentialStatus === null ? 'Checking…' : credentialStatus.tmdb ? 'Configured' : 'Not configured'}</span>
+          </div>
+          <div className="nw-credential-row">
+            <div><strong>Prowlarr</strong><small>Required · Torrent discovery</small></div>
+            <span className={`nw-credential-status ${credentialStatus?.prowlarr ? 'is-configured' : ''}`}>{credentialStatus === null ? 'Checking…' : credentialStatus.prowlarr ? 'Configured' : 'Not configured'}</span>
+          </div>
+
+          {(['opensubtitles', 'subdl'] as const).map(provider => {
+            const label = provider === 'opensubtitles' ? 'OpenSubtitles' : 'SubDL'
+            const statusLoaded = credentialStatus !== null
+            const configured = Boolean(credentialStatus?.[provider])
+            const editing = editingCredential === provider
+            const requiredLength = provider === 'subdl' ? 43 : 32
+            return (
+              <div className="nw-credential-group" key={provider}>
+                <div className="nw-credential-row">
+                  <div><strong>{label}</strong><small>Optional · Online subtitles</small></div>
+                  <div className="nw-credential-row__actions">
+                    <span className={`nw-credential-status ${configured ? 'is-configured' : ''}`}>{!statusLoaded ? 'Checking…' : configured ? 'Configured' : 'Not configured'}</span>
+                    <button className="btn btn-secondary" onClick={() => void openCredentialSite(provider)} disabled={Boolean(credentialBusy)}>Get key</button>
+                    <button className="btn btn-secondary" onClick={() => beginCredentialEdit(provider)} disabled={Boolean(credentialBusy) || !statusLoaded}>{configured ? 'Replace' : 'Add'}</button>
+                  </div>
+                </div>
+
+                {editing && (
+                  <div className="nw-credential-editor">
+                    <label>
+                      <span>{label} API key</span>
+                      {provider === 'subdl' ? (
+                        <div className="nw-credential-prefixed-input">
+                          <span>subdl_</span>
+                          <input
+                            type="password"
+                            autoComplete="off"
+                            spellCheck={false}
+                            maxLength={43}
+                            value={credentialDraft}
+                            onChange={event => setCredentialDraft(event.target.value)}
+                            placeholder="43 characters after subdl_"
+                          />
+                        </div>
+                      ) : (
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          spellCheck={false}
+                          maxLength={32}
+                          value={credentialDraft}
+                          onChange={event => setCredentialDraft(event.target.value)}
+                          placeholder="32-character API key"
+                        />
+                      )}
+                    </label>
+                    <div className="nw-credential-editor__footer">
+                      <small>{provider === 'subdl' ? 'Paste only what comes after subdl_.' : 'Exactly 32 characters.'} {credentialDraft.trim().length} / {requiredLength}</small>
+                      <div>
+                        <button className="btn btn-secondary" onClick={cancelCredentialEdit} disabled={credentialBusy === provider}>Cancel</button>
+                        <button className="btn btn-primary" onClick={() => void saveSubtitleCredential()} disabled={credentialBusy === provider || credentialDraft.trim().length !== requiredLength}>
+                          {credentialBusy === provider ? 'Validating…' : 'Validate & save'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+
+        {credentialError && <p className="nw-credential-error">{credentialError}</p>}
+        <p className="nw-tmdb-attribution">This product uses the TMDB API but is not endorsed or certified by TMDB.</p>
       </section>
 
       <section className="nw-settings-runtime">

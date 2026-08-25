@@ -87,6 +87,7 @@ class RateLimitMiddleware:
     # cannot bypass throttling while still keeping unrelated operations separate.
     LIMITS = {
         ("POST", "/api/torrents/search"): ("torrent-search", 30, 60.0),
+        ("POST", "/api/diagnostics/subtitle-credential"): ("credential-validation", 12, 60.0),
         ("GET", "/api/metadata/status"): ("metadata-status", 30, 60.0),
         ("GET", "/api/metadata/home"): ("metadata-home", 30, 60.0),
         ("GET", "/api/metadata/search"): ("metadata-search", 60, 60.0),

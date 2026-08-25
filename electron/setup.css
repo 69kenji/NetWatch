@@ -159,6 +159,12 @@ input[type="password"]::placeholder { color: #474354; }
 input[type="password"]:focus { border-color: rgba(123,97,255,.68); box-shadow: 0 0 0 3px rgba(123,97,255,.10); }
 input[type="password"]:disabled { opacity: .45; }
 .configured { color: var(--success); font-size: 10px; font-weight: 600; }
+.optional-label { color: #777185; font-size: 9px; font-weight: 560; margin-left: 4px; }
+.credential-hint { display: flex; justify-content: space-between; gap: 10px; color: #625d70; font-size: 9px; }
+.prefixed-secret-input { display: flex; align-items: center; border: 1px solid var(--border-strong); border-radius: 8px; background: #090910; overflow: hidden; }
+.prefixed-secret-input:focus-within { border-color: rgba(123,97,255,.68); box-shadow: 0 0 0 3px rgba(123,97,255,.10); }
+.prefixed-secret-input > span { flex: 0 0 auto; padding-left: 11px; color: #8f899e; font-size: 12px; user-select: none; }
+.prefixed-secret-input input[type="password"] { border: 0; border-radius: 0; box-shadow: none; padding-left: 2px; }
 
 .footer-actions { margin-top: 20px; }
 .prowlarr-key-row { margin-top: 18px; }

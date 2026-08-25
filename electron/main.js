@@ -887,6 +887,27 @@ const CREDENTIAL_SITES = Object.freeze({
   opensubtitles: 'https://www.opensubtitles.com/en/consumers',
   subdl: 'https://subdl.com/panel/api',
 })
+const OPTIONAL_SUBTITLE_PROVIDERS = new Set(['opensubtitles', 'subdl'])
+
+function normalizeCredentialCandidate(name, value) {
+  if (typeof value !== 'string') throw new Error('Credential must be text.')
+  const cleaned = value.trim()
+  if ([...cleaned].some(ch => { const code = ch.charCodeAt(0); return code < 32 || code === 127 })) {
+    throw new Error('Credential contains unsupported control characters.')
+  }
+  if (name === 'subdl') {
+    if (!cleaned.startsWith('subdl_') || cleaned.length !== 49 || cleaned.slice(6).length !== 43) {
+      throw new Error('SubDL API key must contain subdl_ followed by exactly 43 characters.')
+    }
+    return cleaned
+  }
+  if (!['tmdb', 'opensubtitles', 'prowlarr'].includes(name)) throw new Error('Credential type is unsupported.')
+  if (cleaned.length !== 32) {
+    const label = name === 'tmdb' ? 'TMDB' : name === 'opensubtitles' ? 'OpenSubtitles' : 'Prowlarr'
+    throw new Error(`${label} API key must be exactly 32 characters.`)
+  }
+  return cleaned
+}
 const PROWLARR_LOCAL_URL = 'http://127.0.0.1:9696/'
 const SETUP_CHANNELS = [
   'setup:get-state',
@@ -989,6 +1010,54 @@ async function vpnProfileForRenderer() {
   return { ...(state?.vpn_profile || { profile_type: 'generic' }), replacement_pending: false }
 }
 
+async function credentialStatusForRenderer() {
+  const state = await inspectSecureSetupState()
+  const configured = state?.env?.configured || {}
+  return {
+    tmdb: Boolean(configured.tmdb),
+    prowlarr: Boolean(configured.prowlarr),
+    opensubtitles: Boolean(configured.opensubtitles),
+    subdl: Boolean(configured.subdl),
+  }
+}
+
+async function validateSubtitleCredentialThroughVpn(provider, key) {
+  const requestBody = { provider, api_key: key }
+  try {
+    const status = await backendJson('/api/diagnostics/subtitle-credential', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
+    }, 30_000)
+    if (!status?.connected || !status?.authenticated || status?.status !== 'ok') {
+      throw new Error(`${provider === 'opensubtitles' ? 'OpenSubtitles' : 'SubDL'} authentication failed. The entered key was not retained.`)
+    }
+  } finally {
+    requestBody.api_key = ''
+  }
+}
+
+async function saveOptionalSubtitleCredential(provider, candidate) {
+  if (!OPTIONAL_SUBTITLE_PROVIDERS.has(provider)) throw new Error('Unsupported optional credential provider.')
+  const key = normalizeCredentialCandidate(provider, candidate)
+  await validateSubtitleCredentialThroughVpn(provider, key)
+  const secretPayload = { name: provider, value: key }
+  try {
+    await secureConfigAction('set-optional-api', { payload: secretPayload })
+    await logSetupEvent('API_CREDENTIALS_VALIDATED')
+  } finally {
+    secretPayload.value = ''
+  }
+  try {
+    await runWsl(composeCommandArgs('up', '-d', '--force-recreate', 'backend'), 180_000)
+  } catch (_) {
+    throw new Error('The saved subtitle credential could not be loaded by the backend. Restart NetWatch and retry.')
+  }
+  const ready = await waitForHttp(`${BACKEND_BASE_URL}/api/health`, 90_000, 400)
+  if (!ready) throw new Error('The backend did not reload the saved subtitle credential in time. Restart NetWatch and retry.')
+  return credentialStatusForRenderer()
+}
+
 async function setVpnProfileType(profileType) {
   const state = await inspectSecureSetupState()
   if (state?.vpn_replacement?.staged) {
@@ -1052,11 +1121,12 @@ async function verifySetupVpn() {
   return setupStateForRenderer()
 }
 
-function apiValidationSummary(metadata, subtitles) {
+function apiValidationSummary(metadata, subtitles, names) {
+  const requested = new Set(Array.isArray(names) ? names : [])
   const failures = []
-  if (!metadata?.connected || !metadata?.authenticated) failures.push('TMDB authentication failed')
-  if (!subtitles?.opensubtitles?.connected || !subtitles?.opensubtitles?.authenticated) failures.push('OpenSubtitles authentication failed')
-  if (!subtitles?.subdl?.connected || !subtitles?.subdl?.authenticated) failures.push('SubDL authentication failed')
+  if (requested.has('tmdb') && (!metadata?.connected || !metadata?.authenticated)) failures.push('TMDB authentication failed')
+  if (requested.has('opensubtitles') && (!subtitles?.opensubtitles?.connected || !subtitles?.opensubtitles?.authenticated)) failures.push('OpenSubtitles authentication failed')
+  if (requested.has('subdl') && (!subtitles?.subdl?.connected || !subtitles?.subdl?.authenticated)) failures.push('SubDL authentication failed')
   return failures
 }
 
@@ -1078,7 +1148,7 @@ async function validateApiCredentialsThroughVpn(updatedNames) {
     throw new Error('The API providers could not be validated through the VPN. The newly entered values were not retained.')
   }
 
-  const failures = apiValidationSummary(metadata, subtitles)
+  const failures = apiValidationSummary(metadata, subtitles, updatedNames)
   if (failures.length) {
     await secureConfigAction('clear-api', { payload: { names: updatedNames } })
     throw new Error(`${failures.join('; ')}. The newly entered values were not retained.`)
@@ -1139,13 +1209,29 @@ function closeProwlarrSetupWindow() {
   prowlarrSetupWindow = null
 }
 
+function setupReadyToFinish(state) {
+  const configured = state?.env?.configured || {}
+  return Boolean(
+    configured.tmdb && configured.prowlarr
+    && !state?.pending?.api && !state?.pending?.prowlarr && !state?.pending?.vpn
+  )
+}
+
 function scheduleProwlarrSetupIfReady(state) {
   const configured = state?.env?.configured || {}
-  const apiComplete = Boolean(configured.tmdb && configured.opensubtitles && configured.subdl)
+  const apiComplete = Boolean(configured.tmdb)
   if (!apiComplete || configured.prowlarr || state?.pending?.api) return
   setTimeout(() => {
     void createProwlarrSetupWindow().then(() => closeSetupWindow())
   }, 350)
+}
+
+function continueFirstRunAfterApi(state) {
+  if (setupReadyToFinish(state)) {
+    setTimeout(() => { void finishFirstRun() }, 350)
+    return
+  }
+  scheduleProwlarrSetupIfReady(state)
 }
 
 function registerSetupHandlers() {
@@ -1187,12 +1273,7 @@ function registerSetupHandlers() {
         scheduleProwlarrSetupIfReady(state)
       }
     }
-    const configured = state?.env?.configured || {}
-    const alreadyConfigured = Boolean(
-      configured.tmdb && configured.opensubtitles && configured.subdl && configured.prowlarr
-      && !state?.pending?.api && !state?.pending?.prowlarr && !state?.pending?.vpn
-    )
-    if (alreadyConfigured) setTimeout(() => { void finishFirstRun() }, 350)
+    if (setupReadyToFinish(state)) setTimeout(() => { void finishFirstRun() }, 350)
     return { ok: true, state }
   })
   ipcMain.handle('setup:submit-api', async (event, payload) => {
@@ -1202,20 +1283,37 @@ function registerSetupHandlers() {
     if (Object.keys(payload).some(key => !allowed.has(key))) throw new Error('API credential request contains an unsupported field.')
     const before = await inspectSecureSetupState()
     const configured = before?.env?.configured || {}
-    const missing = ['tmdb', 'opensubtitles', 'subdl'].filter(name => !configured[name])
-    if (!missing.length) return { ok: true, state: await setupStateForRenderer() }
-    if (missing.some(name => typeof payload[name] !== 'string' || !payload[name])) {
-      throw new Error('Enter every API credential that is not already configured.')
+    const safePayload = {}
+
+    if (!configured.tmdb) {
+      if (typeof payload.tmdb !== 'string' || !payload.tmdb.trim()) throw new Error('TMDB API key is required.')
+      safePayload.tmdb = normalizeCredentialCandidate('tmdb', payload.tmdb)
     }
-    const safePayload = Object.fromEntries(missing.map(name => [name, payload[name]]))
+    for (const name of ['opensubtitles', 'subdl']) {
+      if (configured[name]) continue
+      const raw = typeof payload[name] === 'string' ? payload[name].trim() : ''
+      if (!raw) continue
+      safePayload[name] = normalizeCredentialCandidate(name, raw)
+    }
+
+    const updatedNames = Object.keys(safePayload)
+    if (!configured.tmdb && !updatedNames.includes('tmdb')) {
+      throw new Error('TMDB API key is required.')
+    }
+    if (!updatedNames.length) {
+      const next = await setupStateForRenderer()
+      continueFirstRunAfterApi(next)
+      return { ok: true, state: next }
+    }
+
     try {
       await secureConfigAction('set-api', { payload: safePayload })
       await logSetupEvent('API_CREDENTIALS_SAVED')
       try {
-        await validateApiCredentialsThroughVpn(missing)
+        await validateApiCredentialsThroughVpn(updatedNames)
         await secureConfigAction('mark-api-validated')
       } catch (error) {
-        await secureConfigAction('clear-api', { payload: { names: missing } }).catch(() => {})
+        await secureConfigAction('clear-api', { payload: { names: updatedNames } }).catch(() => {})
         throw error
       }
     } finally {
@@ -1223,7 +1321,7 @@ function registerSetupHandlers() {
       for (const key of Object.keys(safePayload)) safePayload[key] = ''
     }
     const next = await setupStateForRenderer()
-    scheduleProwlarrSetupIfReady(next)
+    continueFirstRunAfterApi(next)
     return { ok: true, state: next }
   })
   ipcMain.handle('setup:open-credential-site', async (event, site) => {
@@ -1251,6 +1349,7 @@ function registerProwlarrSetupHandlers() {
   ipcMain.handle('prowlarr-setup:submit', async (event, key) => {
     assertWindowSender(event, prowlarrSetupWindow, 'Prowlarr setup', setupWindowUrl('prowlarr-setup.html'))
     if (typeof key !== 'string') throw new Error('Prowlarr credential request is invalid.')
+    key = normalizeCredentialCandidate('prowlarr', key)
     const secretPayload = { prowlarr: key }
     try {
       await secureConfigAction('set-prowlarr', { payload: secretPayload })
@@ -1368,7 +1467,7 @@ async function beginPackagedFirstRun(setupState) {
   }
 
   const configured = setupState?.env?.configured || {}
-  const apiComplete = Boolean(configured.tmdb && configured.opensubtitles && configured.subdl)
+  const apiComplete = Boolean(configured.tmdb)
   const prowlarrComplete = Boolean(configured.prowlarr)
   const pendingApi = Boolean(setupState?.pending?.api)
   const pendingProwlarr = Boolean(setupState?.pending?.prowlarr)
@@ -2664,6 +2763,20 @@ ipcMain.on('window:close', event => { assertMainRendererSender(event); mainWindo
 ipcMain.handle('runtime:get-status', event => { assertMainRendererSender(event); return { ...runtimeStatus, services: { ...runtimeStatus.services } } })
 ipcMain.handle('runtime:retry', event => { assertMainRendererSender(event); return retryRuntime() })
 ipcMain.handle('runtime:vpn-sanity', event => { assertMainRendererSender(event); return vpnSanityCheck() })
+ipcMain.handle('runtime:get-credential-status', async event => {
+  assertMainRendererSender(event)
+  return credentialStatusForRenderer()
+})
+ipcMain.handle('runtime:set-subtitle-credential', async (event, provider, candidate) => {
+  assertMainRendererSender(event)
+  return saveOptionalSubtitleCredential(provider, candidate)
+})
+ipcMain.handle('runtime:open-credential-site', async (event, provider) => {
+  assertMainRendererSender(event)
+  if (!OPTIONAL_SUBTITLE_PROVIDERS.has(provider) || !CREDENTIAL_SITES[provider]) throw new Error('Unknown credential site.')
+  await shell.openExternal(CREDENTIAL_SITES[provider])
+  return { opened: true }
+})
 ipcMain.handle('runtime:get-vpn-profile', async event => {
   assertMainRendererSender(event)
   return vpnProfileForRenderer()

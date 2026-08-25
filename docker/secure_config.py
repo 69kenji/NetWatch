@@ -27,6 +27,16 @@ API_KEYS = {
     "subdl": "SUBDL_API_KEY",
     "prowlarr": "PROWLARR_API_KEY",
 }
+REQUIRED_API_KEYS = {"tmdb", "prowlarr"}
+OPTIONAL_SUBTITLE_API_KEYS = {"opensubtitles", "subdl"}
+CREDENTIAL_LENGTHS = {
+    "tmdb": 32,
+    "opensubtitles": 32,
+    "prowlarr": 32,
+}
+SUBDL_PREFIX = "subdl_"
+SUBDL_SUFFIX_LENGTH = 43
+SUBDL_TOTAL_LENGTH = len(SUBDL_PREFIX) + SUBDL_SUFFIX_LENGTH
 SETUP_EVENTS = {
     "SETUP_STARTED",
     "WG_IMPORT_STARTED",
@@ -308,16 +318,26 @@ def update_env_keys(path: Path, updates: dict[str, str]) -> None:
     atomic_write(path, ("\n".join(output).rstrip() + "\n").encode("utf-8"), 0o600)
 
 
-def validate_secret(label: str, value: object, *, minimum: int = 8, maximum: int = 256) -> str:
+def validate_managed_credential(name: str, value: object) -> str:
+    """Validate the exact credential shape NetWatch supports without echoing secrets."""
+    if name not in API_KEYS:
+        raise ConfigError("SECRET_INVALID", "Credential type is unsupported.")
     if not isinstance(value, str):
-        raise ConfigError("SECRET_INVALID", f"{label} must be text.")
-    if any(ch in value for ch in ("\n", "\r", "\x00")):
-        raise ConfigError("SECRET_INVALID", f"{label} contains unsupported control characters.")
+        raise ConfigError("SECRET_INVALID", f"{name} credential must be text.")
     cleaned = value.strip()
-    if len(cleaned) < minimum or len(cleaned) > maximum:
-        raise ConfigError("SECRET_INVALID", f"{label} has an unexpected length.")
-    if not re.fullmatch(r"[A-Za-z0-9._~+/=:@%-]+", cleaned):
-        raise ConfigError("SECRET_INVALID", f"{label} contains unsupported characters.")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+        raise ConfigError("SECRET_INVALID", f"{name} credential contains unsupported control characters.")
+
+    if name == "subdl":
+        if not cleaned.startswith(SUBDL_PREFIX):
+            raise ConfigError("SECRET_INVALID", "SubDL credential must begin with subdl_.")
+        if len(cleaned) != SUBDL_TOTAL_LENGTH or len(cleaned[len(SUBDL_PREFIX):]) != SUBDL_SUFFIX_LENGTH:
+            raise ConfigError("SECRET_INVALID", "SubDL credential must contain subdl_ followed by exactly 43 characters.")
+        return cleaned
+
+    expected = CREDENTIAL_LENGTHS[name]
+    if len(cleaned) != expected:
+        raise ConfigError("SECRET_INVALID", f"{name} credential must be exactly {expected} characters.")
     return cleaned
 
 
@@ -325,8 +345,7 @@ def existing_secret_is_valid(name: str, value: str | None) -> bool:
     if not configured_secret(value):
         return False
     try:
-        minimum = 16 if name == "prowlarr" else 8
-        validate_secret(name, value, minimum=minimum, maximum=256)
+        validate_managed_credential(name, value)
         return True
     except ConfigError:
         return False
@@ -744,7 +763,8 @@ def inspect_state(base: Path) -> dict[str, object]:
             "vpn": pending_vpn,
         },
         "complete": bool(
-            wg_valid and env_parse_ok and all(configured.values()) and dirs_secure and files_secure
+            wg_valid and env_parse_ok and all(configured[name] for name in REQUIRED_API_KEYS)
+            and dirs_secure and files_secure
             and not pending_api and not pending_prowlarr and not pending_vpn
         ),
     }
@@ -894,7 +914,7 @@ def main() -> int:
             for name in ("tmdb", "opensubtitles", "subdl"):
                 if name not in payload:
                     continue
-                updates[API_KEYS[name]] = validate_secret(name, payload[name], minimum=8, maximum=256)
+                updates[API_KEYS[name]] = validate_managed_credential(name, payload[name])
             if not updates:
                 raise ConfigError("API_EMPTY", "No API credentials were supplied.")
             paths = ensure_dirs(base)
@@ -915,6 +935,26 @@ def main() -> int:
                 remove_private_file(pending_path)
                 raise
             print(json.dumps({"ok": True, "updated": updated_names}, separators=(",", ":")))
+            return 0
+
+
+        if action == "set-optional-api":
+            payload = read_payload()
+            name = payload.get("name")
+            if name not in OPTIONAL_SUBTITLE_API_KEYS:
+                raise ConfigError("API_OPTIONAL_INVALID", "Optional credential request is invalid.")
+            value = validate_managed_credential(str(name), payload.get("value"))
+            paths = ensure_dirs(base)
+            env_path = paths["config"] / "backend.env"
+            ensure_backend_env(env_path)
+            values, parse_ok = parse_env(env_path)
+            if not parse_ok:
+                raise ConfigError("ENV_INVALID", "The private environment file is malformed.")
+            # The caller validates the candidate through the VPN-routed backend first.
+            # This write is the promotion step and is atomic, so a failed candidate never
+            # destroys the currently working credential.
+            update_env_keys(env_path, {API_KEYS[str(name)]: value})
+            print(json.dumps({"ok": True, "updated": [name]}, separators=(",", ":")))
             return 0
 
         if action == "clear-api":
@@ -938,7 +978,7 @@ def main() -> int:
 
         if action == "set-prowlarr":
             payload = read_payload()
-            key = validate_secret("prowlarr", payload.get("prowlarr"), minimum=16, maximum=256)
+            key = validate_managed_credential("prowlarr", payload.get("prowlarr"))
             paths = ensure_dirs(base)
             env_path = paths["config"] / "backend.env"
             ensure_backend_env(env_path)

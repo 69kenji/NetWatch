@@ -107,6 +107,13 @@ interface NetWatchRuntimeStatus {
 }
 
 
+interface NetWatchCredentialStatus {
+  tmdb: boolean
+  prowlarr: boolean
+  opensubtitles: boolean
+  subdl: boolean
+}
+
 interface NetWatchVpnProfile {
   profile_type: 'generic' | 'vpnbook'
   imported_at?: string | null
@@ -145,6 +152,9 @@ interface Window {
       getStatus: () => Promise<NetWatchRuntimeStatus>
       retry: () => Promise<NetWatchRuntimeStatus>
       vpnSanity: () => Promise<NetWatchVpnSanityResult>
+      getCredentialStatus: () => Promise<NetWatchCredentialStatus>
+      setSubtitleCredential: (provider: 'opensubtitles' | 'subdl', candidate: string) => Promise<NetWatchCredentialStatus>
+      openCredentialSite: (provider: 'opensubtitles' | 'subdl') => Promise<{ opened: boolean }>
       getVpnProfile: () => Promise<NetWatchVpnProfile>
       setVpnProfileType: (profileType: 'generic' | 'vpnbook') => Promise<NetWatchVpnProfile>
       replaceWireGuard: (profileType: 'generic' | 'vpnbook') => Promise<{

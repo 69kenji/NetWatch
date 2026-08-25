@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -69,6 +70,12 @@ class RateLimitSecurityTests(unittest.TestCase):
             ("metadata-status", 30, 60.0),
         )
 
+    def test_credential_validation_is_rate_limited(self):
+        self.assertEqual(
+            self.middleware._rule_for("POST", "/api/diagnostics/subtitle-credential"),
+            ("credential-validation", 12, 60.0),
+        )
+
     def test_static_search_variants_share_provider_bucket(self):
         rules = {
             self.middleware._rule_for("GET", "/api/metadata/search"),
@@ -99,6 +106,33 @@ class ApiBoundaryTests(unittest.TestCase):
             headers={"Content-Type": "application/json"},
         )
         self.assertEqual(response.status_code, 413)
+
+    def test_optional_subtitle_candidate_shape_is_rejected_before_provider_call(self):
+        with patch("routes.diagnostics.SubtitleService.validate_candidate", new=AsyncMock()) as validate:
+            bad_open = self.client.post(
+                "/api/diagnostics/subtitle-credential",
+                json={"provider": "opensubtitles", "api_key": "o" * 31},
+            )
+            bad_subdl = self.client.post(
+                "/api/diagnostics/subtitle-credential",
+                json={"provider": "subdl", "api_key": "x" * 49},
+            )
+            self.assertEqual(bad_open.status_code, 422)
+            self.assertEqual(bad_subdl.status_code, 400)
+            validate.assert_not_awaited()
+
+    def test_optional_subtitle_candidate_is_transient_and_not_echoed(self):
+        key = "o" * 32
+        result = {"status": "ok", "connected": True, "authenticated": True}
+        with patch("routes.diagnostics.SubtitleService.validate_candidate", new=AsyncMock(return_value=result)) as validate:
+            response = self.client.post(
+                "/api/diagnostics/subtitle-credential",
+                json={"provider": "opensubtitles", "api_key": key},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()["authenticated"])
+            self.assertNotIn(key, response.text)
+            validate.assert_awaited_once_with("opensubtitles", key)
 
     def test_packaged_origin_is_allowed_but_random_origin_is_not(self):
         allowed = self.client.options(

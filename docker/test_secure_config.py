@@ -85,9 +85,20 @@ class SecureConfigTests(unittest.TestCase):
             state = secure_config.inspect_state(base)
             self.assertEqual(state["permissions"]["modes"]["backend_env"], "600")
 
-    def test_env_secret_rejects_newline(self):
+    def test_managed_credential_shapes_are_exact(self):
+        self.assertEqual(secure_config.validate_managed_credential("tmdb", "t" * 32), "t" * 32)
+        self.assertEqual(secure_config.validate_managed_credential("opensubtitles", "o" * 32), "o" * 32)
+        self.assertEqual(secure_config.validate_managed_credential("prowlarr", "p" * 32), "p" * 32)
+        subdl = "subdl_" + "s" * 43
+        self.assertEqual(secure_config.validate_managed_credential("subdl", subdl), subdl)
+        for name, value in (("tmdb", "t" * 31), ("opensubtitles", "o" * 33), ("prowlarr", "p" * 31), ("subdl", "s" * 49), ("subdl", "subdl_" + "s" * 42)):
+            with self.subTest(name=name, length=len(value)):
+                with self.assertRaises(secure_config.ConfigError):
+                    secure_config.validate_managed_credential(name, value)
+
+    def test_env_secret_rejects_control_characters(self):
         with self.assertRaises(secure_config.ConfigError):
-            secure_config.validate_secret("tmdb", "abc\ndefghijk")
+            secure_config.validate_managed_credential("tmdb", "t" * 16 + "\n" + "t" * 16)
 
     def test_rejects_all_command_directives(self):
         for directive in ("PreUp", "PostUp", "PreDown", "PostDown"):
@@ -103,11 +114,11 @@ class SecureConfigTests(unittest.TestCase):
             secure_config.parse_wireguard(text, allow_netwatch_hooks=False)
         self.assertEqual(ctx.exception.code, "WG_DUPLICATE_FIELD")
 
-    def test_secret_validation_rejects_env_metacharacters(self):
-        for value in ("abcdefgh\nSECOND=owned", "abcdefgh\x00tail", "abc defgh"):
+    def test_secret_validation_rejects_embedded_control_characters(self):
+        for value in ("t" * 16 + "\n" + "t" * 16, "t" * 16 + "\x00" + "t" * 16):
             with self.subTest(value=repr(value)):
                 with self.assertRaises(secure_config.ConfigError):
-                    secure_config.validate_secret("api", value)
+                    secure_config.validate_managed_credential("tmdb", value)
 
     def test_env_update_preserves_unmanaged_settings(self):
         with tempfile.TemporaryDirectory() as root:
@@ -150,7 +161,13 @@ class SecureConfigTests(unittest.TestCase):
             base = Path(root) / "netwatch"
             secure_config.inspect_state(base)
             env = base / "config" / "backend.env"
-            env.write_text("TMDB_API_KEY=bad value\nOPENSUBTITLES_API_KEY=abcdefgh\nSUBDL_API_KEY=abcdefgh\nPROWLARR_API_KEY=abcdefghijklmnop\n", encoding="utf-8")
+            env.write_text(
+                "TMDB_API_KEY=bad value\n"
+                + "OPENSUBTITLES_API_KEY=" + "o" * 32 + "\n"
+                + "SUBDL_API_KEY=subdl_" + "s" * 43 + "\n"
+                + "PROWLARR_API_KEY=" + "p" * 32 + "\n",
+                encoding="utf-8",
+            )
             state = secure_config.inspect_state(base)
             self.assertFalse(state["env"]["parse_ok"])
             self.assertFalse(state["env"]["configured"]["tmdb"])
@@ -178,10 +195,10 @@ class SecureConfigTests(unittest.TestCase):
             secure_config.inspect_state(base)
             env = base / "config" / "backend.env"
             env.write_text(
-                "TMDB_API_KEY=abcdefgh\n"
-                "OPENSUBTITLES_API_KEY=abcdefgh\n"
-                "SUBDL_API_KEY=abcdefgh\n"
-                "PROWLARR_API_KEY=abcdefghijklmnop\n",
+                "TMDB_API_KEY=" + "t" * 32 + "\n"
+                + "OPENSUBTITLES_API_KEY=" + "o" * 32 + "\n"
+                + "SUBDL_API_KEY=subdl_" + "s" * 43 + "\n"
+                + "PROWLARR_API_KEY=" + "p" * 32 + "\n",
                 encoding="utf-8",
             )
             os.chmod(env, 0o600)
@@ -192,6 +209,26 @@ class SecureConfigTests(unittest.TestCase):
             self.assertEqual(state["pending"]["api_names"], ["opensubtitles", "subdl", "tmdb"])
             self.assertFalse(state["complete"])
             self.assertEqual(state["permissions"]["modes"]["pending_api"], "600")
+
+    def test_optional_subtitle_credentials_are_not_required_for_completion(self):
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root) / "netwatch"
+            paths = secure_config.ensure_dirs(base)
+            secure_config.ensure_backend_env(paths["config"] / "backend.env")
+            secure_config.update_env_keys(paths["config"] / "backend.env", {
+                "TMDB_API_KEY": "t" * 32,
+                "PROWLARR_API_KEY": "p" * 32,
+                "OPENSUBTITLES_API_KEY": "",
+                "SUBDL_API_KEY": "",
+            })
+            parsed = secure_config.parse_wireguard(valid_config(), allow_netwatch_hooks=False)
+            secure_config.atomic_write(paths["wg_confs"] / "wg0.conf", secure_config.render_wireguard(parsed), 0o600)
+            state = secure_config.inspect_state(base)
+            self.assertTrue(state["env"]["configured"]["tmdb"])
+            self.assertTrue(state["env"]["configured"]["prowlarr"])
+            self.assertFalse(state["env"]["configured"]["opensubtitles"])
+            self.assertFalse(state["env"]["configured"]["subdl"])
+            self.assertTrue(state["complete"])
 
     def test_pending_prowlarr_recovery_state_prevents_completion(self):
         with tempfile.TemporaryDirectory() as root:

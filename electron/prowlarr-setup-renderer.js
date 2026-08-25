@@ -6,6 +6,7 @@ const message = document.getElementById('message')
 const progress = document.getElementById('progress')
 let busy = false
 let ready = false
+const REQUIRED_KEY_LENGTH = 32
 
 function setMessage(text, kind = '') {
   message.textContent = text
@@ -15,7 +16,7 @@ function setBusy(next, text = '') {
   busy = next
   progress.classList.toggle('active', next)
   openButton.disabled = next || !ready
-  saveButton.disabled = next || !ready
+  saveButton.disabled = next || !ready || input.value.trim().length !== REQUIRED_KEY_LENGTH
   input.disabled = next || !ready
   if (text) setMessage(text)
 }
@@ -41,6 +42,10 @@ async function prepare() {
   }
 }
 
+input.addEventListener('input', () => {
+  if (!busy) saveButton.disabled = !ready || input.value.trim().length !== REQUIRED_KEY_LENGTH
+})
+
 openButton.addEventListener('click', async () => {
   if (busy || !ready) return
   try { await window.netwatchProwlarrSetup.open() }
@@ -49,6 +54,10 @@ openButton.addEventListener('click', async () => {
 
 saveButton.addEventListener('click', async () => {
   if (busy || !ready) return
+  if (input.value.trim().length !== REQUIRED_KEY_LENGTH) {
+    setMessage('Prowlarr API key must be exactly 32 characters.', 'error')
+    return
+  }
   setBusy(true, 'Verifying Prowlarr…')
   try {
     await window.netwatchProwlarrSetup.submitKey(input.value)
