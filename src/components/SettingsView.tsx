@@ -42,6 +42,12 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
   const [credentialError, setCredentialError] = useState<string | null>(null)
   const [editingCredential, setEditingCredential] = useState<SubtitleCredentialProvider | null>(null)
   const [credentialDraft, setCredentialDraft] = useState('')
+  const [remoteStatus, setRemoteStatus] = useState<NetWatchRemoteStatus | null>(null)
+  const [remoteHost, setRemoteHost] = useState('')
+  const [remotePort, setRemotePort] = useState('42117')
+  const [remoteBusy, setRemoteBusy] = useState(false)
+  const [remoteError, setRemoteError] = useState<string | null>(null)
+  const [pairing, setPairing] = useState<NetWatchPairingPayload | null>(null)
 
   useEffect(() => {
     let active = true
@@ -60,6 +66,27 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
     }
     void load()
     return () => { active = false }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    const api = window.electron?.remote
+    if (!api) return
+    const apply = (status: NetWatchRemoteStatus) => {
+      if (!active) return
+      setRemoteStatus(status)
+      setRemoteHost(current => current || status.selected_host || status.interfaces?.[0]?.address || '')
+      setRemotePort(current => current === '42117' && status.selected_port ? String(status.selected_port) : current)
+      if (!status.pairing_active) setPairing(null)
+    }
+    void api.getStatus().then(apply, error => {
+      if (active) setRemoteError(error instanceof Error ? error.message : String(error))
+    })
+    const unsubscribe = api.onStatus(apply)
+    return () => {
+      active = false
+      unsubscribe()
+    }
   }, [])
 
   useEffect(() => {
@@ -217,6 +244,43 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
     }
   }
 
+  const runRemoteAction = async (action: () => Promise<NetWatchRemoteStatus>) => {
+    setRemoteBusy(true)
+    setRemoteError(null)
+    try {
+      setRemoteStatus(await action())
+    } catch (error) {
+      setRemoteError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setRemoteBusy(false)
+    }
+  }
+
+  const enableRemote = () => {
+    const port = Number(remotePort)
+    if (!remoteHost || !Number.isInteger(port) || port < 1024 || port > 65535) {
+      setRemoteError('Select a private network interface and a port from 1024 to 65535.')
+      return
+    }
+    const api = window.electron?.remote
+    if (!api) return
+    void runRemoteAction(() => api.enable({ host: remoteHost, port }))
+  }
+
+  const beginPairing = async () => {
+    const api = window.electron?.remote
+    if (!api) return
+    setRemoteBusy(true)
+    setRemoteError(null)
+    try {
+      setPairing(await api.beginPairing())
+    } catch (error) {
+      setRemoteError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setRemoteBusy(false)
+    }
+  }
+
   const checkedTime = vpnCheck?.checked_at
     ? new Date(vpnCheck.checked_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : null
@@ -344,6 +408,110 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
             </div>
           )}
         </div>
+      </section>
+
+      <section className={`nw-settings-runtime nw-remote-panel ${remoteStatus?.enabled ? 'is-safe' : remoteStatus?.error ? 'is-error' : ''}`}>
+        <div className="nw-remote-panel__header">
+          <div>
+            <span className="nw-settings-label">Remote access</span>
+            <strong>{remoteStatus?.enabled ? 'On' : 'Off'}</strong>
+          </div>
+        </div>
+
+        {!remoteStatus?.enabled ? (
+          <>
+            <div className="nw-remote-enable-row">
+              <label>
+                <span>Private interface</span>
+                <select className="nw-settings-select" value={remoteHost} onChange={event => setRemoteHost(event.target.value)} disabled={remoteBusy}>
+                  {!remoteStatus?.interfaces?.length && <option value="">No private IPv4 interface found</option>}
+                  {remoteStatus?.interfaces?.map(item => (
+                    <option value={item.address} key={item.id}>{item.name} · {item.address}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Port</span>
+                <input value={remotePort} inputMode="numeric" maxLength={5} onChange={event => setRemotePort(event.target.value.replace(/\D/gu, ''))} disabled={remoteBusy} />
+              </label>
+              <button className="btn btn-primary" onClick={enableRemote} disabled={remoteBusy || !remoteHost}>Enable</button>
+            </div>
+            {!!remoteStatus?.paired_devices?.some(item => !item.revoked) && (
+              <div className="nw-remote-devices">
+                <div className="nw-remote-devices__heading"><strong>Paired devices (listener disabled)</strong></div>
+                {remoteStatus.paired_devices.filter(item => !item.revoked).map(device => (
+                  <div className="nw-remote-device" key={device.id}>
+                    <div><strong>{device.name}</strong><small>{device.last_seen ? `Last seen ${new Date(device.last_seen).toLocaleString()}` : 'Not connected yet'}</small></div>
+                    <button className="btn btn-secondary" disabled={remoteBusy} onClick={() => {
+                      const api = window.electron?.remote
+                      if (api) void runRemoteAction(() => api.revokeDevice(device.id))
+                    }}>Revoke</button>
+                  </div>
+                ))}
+                <button className="btn btn-secondary" disabled={remoteBusy} onClick={() => {
+                  const api = window.electron?.remote
+                  if (api) void runRemoteAction(() => api.revokeAll())
+                }}>Revoke all devices</button>
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <div className="nw-remote-overview">
+              <div className="nw-remote-address">
+                <span>Local address</span>
+                <strong>{remoteStatus.host || remoteStatus.selected_host}:{remoteStatus.port || remoteStatus.selected_port}</strong>
+                <small>{remoteStatus.runtime_ready ? 'Protected runtime ready' : 'Gateway available; protected runtime not ready'}</small>
+              </div>
+              {!pairing && <button className="btn btn-primary" onClick={() => void beginPairing()} disabled={remoteBusy}>Pair device</button>}
+            </div>
+
+            {pairing && (
+              <div className="nw-pairing-card">
+                <img src={pairing.qr_data_url} alt="NetWatch Android pairing QR code" />
+                <div>
+                  <strong>Scan with NetWatch Android</strong>
+                  <span>{pairing.host}:{pairing.port}</span>
+                  <small>Expires {new Date(pairing.expires_at).toLocaleTimeString()}. The one-time secret is contained only in this QR code.</small>
+                  <button className="btn btn-secondary" onClick={() => {
+                    const api = window.electron?.remote
+                    if (api) void runRemoteAction(() => api.cancelPairing())
+                  }}>Cancel pairing</button>
+                </div>
+              </div>
+            )}
+
+            <div className="nw-remote-devices">
+              <div className="nw-remote-devices__heading"><strong>Paired devices</strong><span>{remoteStatus.paired_devices?.filter(item => !item.revoked).length || 0}</span></div>
+              {remoteStatus.paired_devices?.filter(item => !item.revoked).map(device => (
+                <div className="nw-remote-device" key={device.id}>
+                  <div><strong>{device.name}</strong><small>{device.last_seen ? `Last seen ${new Date(device.last_seen).toLocaleString()}` : 'Not connected yet'}</small></div>
+                  <button className="btn btn-secondary" disabled={remoteBusy} onClick={() => {
+                    const api = window.electron?.remote
+                    if (api) void runRemoteAction(() => api.revokeDevice(device.id))
+                  }}>Revoke</button>
+                </div>
+              ))}
+              {!remoteStatus.paired_devices?.some(item => !item.revoked) && <p className="nw-remote-empty">No paired devices.</p>}
+            </div>
+
+            <div className="nw-remote-actions">
+              <button className="btn btn-secondary" disabled={remoteBusy} onClick={() => {
+                const api = window.electron?.remote
+                if (api) void runRemoteAction(() => api.disable())
+              }}>Disable</button>
+              <button className="btn btn-secondary" disabled={remoteBusy} onClick={() => {
+                const api = window.electron?.remote
+                if (api) void runRemoteAction(() => api.revokeAll())
+              }}>Revoke all devices</button>
+              <button className="btn btn-secondary" disabled={remoteBusy} onClick={() => {
+                const api = window.electron?.remote
+                if (api) void runRemoteAction(() => api.regenerateIdentity())
+              }}>Regenerate identity</button>
+            </div>
+          </>
+        )}
+        {(remoteError || remoteStatus?.error) && <p className="nw-credential-error">{remoteError || remoteStatus?.error}</p>}
       </section>
 
       <section className="nw-settings-runtime nw-credentials-panel">

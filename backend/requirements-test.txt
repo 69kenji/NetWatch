@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Required by starlette.testclient in the backend security-boundary suite.
+httpx2==2.12.0

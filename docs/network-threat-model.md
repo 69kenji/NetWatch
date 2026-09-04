@@ -34,6 +34,8 @@ Windows Electron / mpv
                    Internet
 ```
 
+When the user explicitly enables Android Remote Access, Electron also starts an isolated utility process that binds one selected RFC1918 host address. That gateway talks to the existing backend only through `127.0.0.1:8000`; it does not alter Docker publication or the inner WireGuard routing authority. See [`remote-security-model.md`](remote-security-model.md).
+
 Backend, torrent-engine, Prowlarr, and FlareSolverr use `network_mode: service:vpn`, so they share the VPN service's network namespace instead of receiving independent Docker egress paths.
 
 ## Enforced boundaries
@@ -46,6 +48,7 @@ Backend, torrent-engine, Prowlarr, and FlareSolverr use `network_mode: service:v
 - Windows publishes only `127.0.0.1:8000` (backend) and `127.0.0.1:9696` (Prowlarr).
 - Torrent-engine and FlareSolverr are not published to Windows.
 - The namespace firewall rejects WireGuard-peer access to control ports `8000`, `8081`, `8191`, and `9696`.
+- Remote Access adds only its selected TLS gateway port. It never republishes `8000`, `8081`, `8191`, or `9696` to the LAN and creates no router mappings.
 
 The backend and torrent-engine listen on all IPv4 interfaces inside the shared namespace because Docker's Windows port publication is DNATed to that namespace. Their listener address is not the remote-access boundary; the host bindings and namespace firewall are.
 

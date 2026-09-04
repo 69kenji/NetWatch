@@ -7,6 +7,7 @@ const { MpvController } = require('./mpv-controller')
 const { METADATA_PREPARATION_TIMEOUT_MS, metadataPreparationTimedOut } = require('./preparation-policy')
 const { playerFullscreenShortcutAction } = require('./player-shortcuts')
 const { VPNBOOK_REFRESH_URL, normalizeVpnProfileType, wireGuardFileTimestamps } = require('./vpn-profile')
+const { RemoteGatewayController } = require('./remote-gateway-controller')
 
 protocol.registerSchemesAsPrivileged([{
   scheme: 'app',
@@ -64,6 +65,7 @@ let setupWindow = null
 let prowlarrSetupWindow = null
 let setupVpnVerified = false
 let firstRunTransitionPromise = null
+let remoteGateway = null
 
 const mpv = new MpvController()
 
@@ -263,6 +265,7 @@ function setRuntimeStatus(patch) {
     },
   }
   sendRuntimeStatus()
+  void remoteGateway?.setRuntimeReady(Boolean(runtimeStatus.ready))
   return { ...runtimeStatus, services: { ...runtimeStatus.services } }
 }
 
@@ -2651,6 +2654,16 @@ mpv.on('log', entry => sendToPlayerRenderer('player:log', entry))
 app.whenReady().then(async () => {
   await registerAppProtocol()
   hardenDefaultSession()
+  remoteGateway = new RemoteGatewayController({
+    getRuntimeReady: () => Boolean(runtimeStatus.ready),
+    isTorrentInDesktopUse: infoHash => Boolean(
+      playerSession?.infoHash && String(playerSession.infoHash).toLowerCase() === String(infoHash).toLowerCase()
+    ),
+    onStatus: status => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('remote:status', status)
+    },
+  })
+  await remoteGateway.initialize()
   // Player-core smoke mode remains independent of the main GUI/orchestrator.
   // Existing smoke scripts can keep owning Vite/Docker exactly as before.
   // The torrent-source variant exercises the exact production lifecycle: open
@@ -2724,6 +2737,7 @@ app.on('before-quit', event => {
     closingPlayer = true
     void mpv.stop({ graceful: false })
     if (backendProcess) backendProcess.kill()
+    void remoteGateway?.stopChild()
     stopOwnedVite()
     return
   }
@@ -2734,6 +2748,7 @@ app.on('before-quit', event => {
     void closePlayerSession().finally(() => {
       quitCleanupComplete = true
       if (backendProcess) backendProcess.kill()
+      void remoteGateway?.stopChild()
       stopOwnedVite()
       app.quit()
     })
@@ -2744,11 +2759,13 @@ app.on('before-quit', event => {
   closingPlayer = true
   void mpv.stop({ graceful: false })
   if (backendProcess) backendProcess.kill()
+  void remoteGateway?.stopChild()
   stopOwnedVite()
 })
 
 app.on('window-all-closed', () => {
   if (backendProcess) backendProcess.kill()
+  void remoteGateway?.stopChild()
   stopOwnedVite()
   if (process.platform !== 'darwin') app.quit()
 })
@@ -2803,6 +2820,61 @@ ipcMain.handle('runtime:restart-app', event => {
   app.relaunch()
   app.quit()
   return { restarting: true }
+})
+
+// Remote Access is controlled by the main renderer, but all network handling
+// runs in an isolated utility process. No TLS key or device credential is ever
+// returned across this renderer IPC boundary.
+ipcMain.handle('remote:get-status', event => {
+  assertMainRendererSender(event)
+  return remoteGateway?.publicStatus() || { enabled: false, configured_enabled: false, interfaces: [], paired_devices: [] }
+})
+ipcMain.handle('remote:enable', async (event, options) => {
+  assertMainRendererSender(event)
+  if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('Remote Access options are invalid')
+  return remoteGateway.enable({ host: options.host, port: options.port })
+})
+ipcMain.handle('remote:disable', async event => {
+  assertMainRendererSender(event)
+  return remoteGateway.disable()
+})
+ipcMain.handle('remote:begin-pairing', async event => {
+  assertMainRendererSender(event)
+  return remoteGateway.beginPairing()
+})
+ipcMain.handle('remote:cancel-pairing', async event => {
+  assertMainRendererSender(event)
+  return remoteGateway.cancelPairing()
+})
+ipcMain.handle('remote:revoke-device', async (event, deviceId) => {
+  assertMainRendererSender(event)
+  return remoteGateway.revokeDevice(deviceId)
+})
+ipcMain.handle('remote:revoke-all', async event => {
+  assertMainRendererSender(event)
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    buttons: ['Cancel', 'Revoke all'],
+    defaultId: 0,
+    cancelId: 0,
+    title: 'Revoke all paired devices?',
+    message: 'Every Android device will immediately lose access.',
+  })
+  if (result.response !== 1) return remoteGateway.publicStatus()
+  return remoteGateway.revokeAll()
+})
+ipcMain.handle('remote:regenerate-identity', async event => {
+  assertMainRendererSender(event)
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    buttons: ['Cancel', 'Regenerate identity'],
+    defaultId: 0,
+    cancelId: 0,
+    title: 'Regenerate Remote Access identity?',
+    message: 'The TLS identity will change and every Android device must pair again.',
+  })
+  if (result.response !== 1) return remoteGateway.publicStatus()
+  return remoteGateway.regenerateIdentity()
 })
 
 // Native mpv player control. Opening a torrent belongs to the main renderer;

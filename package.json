@@ -1,6 +1,6 @@
 {
   "name": "netwatch",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Self-hosted Windows media client with a Docker/VPN-isolated runtime",
   "license": "GPL-3.0-only",
   "main": "electron/main.js",
@@ -8,6 +8,7 @@
     "dev": "concurrently \"npm run dev:react\" \"npm run dev:electron\"",
     "dev:react": "vite",
     "build:renderer": "vite build",
+    "test:gateway": "node --test remote-gateway/test/*.test.js",
     "dev:electron": "wait-on http://localhost:5173 && electron .",
     "build": "npm run package:win",
     "docker:up": "docker compose -f docker/docker-compose.yml up -d",
@@ -17,11 +18,14 @@
     "backend:unsafe-host-dev": "cd backend && uvicorn main:app --reload --port 8000"
   },
   "dependencies": {
+    "@peculiar/x509": "^2.0.0",
     "axios": "^1.18.1",
     "framer-motion": "^11.3.0",
     "iconoir-react": "^7.12.1",
+    "qrcode": "^1.5.4",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
+    "reflect-metadata": "^0.2.2",
     "zustand": "^4.5.0"
   },
   "devDependencies": {
@@ -38,6 +42,8 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "remote-gateway/**/*",
+      "!remote-gateway/test/**/*",
       "package.json"
     ],
     "extraResources": [
@@ -143,7 +149,7 @@
       "include": "build/installer.nsh",
       "allowToChangeInstallationDirectory": true
     },
-    "copyright": "Copyright \u00a9 2026 NetWatch contributors"
+    "copyright": "Copyright © 2026 NetWatch contributors"
   },
   "engines": {
     "node": ">=22.12 <23"

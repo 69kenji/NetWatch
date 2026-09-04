@@ -33,6 +33,7 @@ Torrent, metadata, subtitle, and indexer traffic runs inside a shared Docker/WSL
 - Native mpv playback with fullscreen, seeking, audio tracks, subtitles, buffering, and network stats.
 - Optional OpenSubtitles and SubDL integration.
 - Inner WireGuard routing with fail-closed startup checks, VPN-side DNS, and optional VPNBook profile reminders.
+- Opt-in, TLS-pinned LAN streaming to the Android thin client; the PC remains the torrent and VPN authority.
 
 ## Screenshots
 
@@ -135,7 +136,7 @@ npm run package:win
 Output:
 
 ```text
-release\NetWatch-Setup-1.0.8.exe
+release\NetWatch-Setup-1.0.9.exe
 ```
 
 Use `npm ci` for reproducible builds. See [`packaging/PACKAGING.md`](packaging/PACKAGING.md) for Windows packaging details.
@@ -181,6 +182,19 @@ Torrent engine:
 python3 -m unittest -v torrent-engine/test_engine.py
 ```
 
+Remote gateway:
+
+```powershell
+npm run test:gateway
+```
+
+Android (JDK 17 and Android API 37 SDK required):
+
+```powershell
+cd android
+.\gradlew.bat testDebugUnitTest assembleDebug
+```
+
 
 Configured-environment smoke scripts are under `backend/scripts/`. Some make real provider, indexer, or torrent requests.
 
@@ -212,6 +226,8 @@ Move the checkout to Windows NTFS and rerun `npm ci` and the packaging command.
 The inner WireGuard tunnel is the authoritative Internet path for NetWatch's backend services. Windows-facing services are published on loopback only, and VPN-side control ports are blocked from WireGuard peers.
 
 A Windows host VPN can be used as an extra layer, but it does not replace the inner tunnel.
+
+Remote Access is disabled by default. When explicitly enabled, a separate TLS gateway binds only the selected private IPv4 interface; existing backend and service ports remain loopback-only. Pairing is short-lived, Android pins the PC identity, and devices can be revoked individually. See [`docs/remote-security-model.md`](docs/remote-security-model.md) and [`remote-gateway/protocol/remote-v1.md`](remote-gateway/protocol/remote-v1.md).
 
 NetWatch does not promise anonymity or protection from a compromised host, VPN provider, dependency, or third-party service. See [`docs/network-threat-model.md`](docs/network-threat-model.md) for the full model and [`SECURITY.md`](SECURITY.md) for vulnerability reporting.
 

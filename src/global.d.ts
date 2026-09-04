@@ -141,6 +141,45 @@ interface NetWatchVpnSanityResult {
   structural_verified: boolean
 }
 
+interface NetWatchRemoteInterface {
+  id: string
+  name: string
+  address: string
+  netmask: string
+  cidr?: string | null
+}
+
+interface NetWatchRemoteDevice {
+  id: string
+  name: string
+  paired_at?: string | null
+  last_seen?: string | null
+  revoked: boolean
+}
+
+interface NetWatchRemoteStatus {
+  enabled: boolean
+  configured_enabled: boolean
+  host?: string | null
+  port?: number
+  selected_host?: string | null
+  selected_port?: number
+  pairing_active?: boolean
+  runtime_ready?: boolean
+  error?: string | null
+  interfaces: NetWatchRemoteInterface[]
+  paired_devices: NetWatchRemoteDevice[]
+}
+
+interface NetWatchPairingPayload {
+  version: number
+  host: string
+  port: number
+  expires_at: string
+  server_spki_sha256: string
+  qr_data_url: string
+}
+
 interface Window {
   electron?: {
     window: {
@@ -165,6 +204,17 @@ interface Window {
       openVpnBook: () => Promise<{ opened: boolean }>
       restartApp: () => Promise<{ restarting: boolean }>
       onStatus: (callback: (status: NetWatchRuntimeStatus) => void) => () => void
+    }
+    remote: {
+      getStatus: () => Promise<NetWatchRemoteStatus>
+      enable: (options: { host: string; port: number }) => Promise<NetWatchRemoteStatus>
+      disable: () => Promise<NetWatchRemoteStatus>
+      beginPairing: () => Promise<NetWatchPairingPayload>
+      cancelPairing: () => Promise<NetWatchRemoteStatus>
+      revokeDevice: (deviceId: string) => Promise<NetWatchRemoteStatus>
+      revokeAll: () => Promise<NetWatchRemoteStatus>
+      regenerateIdentity: () => Promise<NetWatchRemoteStatus>
+      onStatus: (callback: (status: NetWatchRemoteStatus) => void) => () => void
     }
     player: {
       openTorrent: (request: {

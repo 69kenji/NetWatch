@@ -2055,6 +2055,49 @@ body, button, input, select, textarea {
 }
 
 /* Provider credential status/management. Active secret values never enter the renderer. */
+.nw-remote-panel { display: flex; flex-direction: column; align-items: stretch; gap: 12px; }
+.nw-remote-panel > .nw-remote-panel__header { display: flex; flex-direction: row; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.nw-remote-panel__header > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.nw-remote-empty { margin: 0; color: #77717f; font-size: 9px; line-height: 1.5; }
+.nw-remote-panel > .nw-remote-enable-row { display: grid; grid-template-columns: minmax(260px, 1fr) 110px auto; gap: 10px; align-items: end; width: min(700px, 100%); }
+.nw-remote-enable-row label { display: flex; flex-direction: column; gap: 6px; color: #77717f; font-size: 9px; }
+.nw-remote-enable-row .nw-settings-select,
+.nw-remote-enable-row input {
+  box-sizing: border-box; width: 100%; height: 34px; min-height: 34px; border: 1px solid rgba(255,255,255,.09); border-radius: 8px;
+  background: #11111a; color: #d6d2dc; padding: 0 10px; outline: none;
+}
+.nw-remote-enable-row input:focus { border-color: rgba(123,97,255,.48); }
+.nw-remote-enable-row .btn { min-width: 76px; }
+.nw-remote-panel > .nw-remote-overview { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 10px; align-items: stretch; }
+.nw-remote-overview > .btn { align-self: center; }
+.nw-remote-address { display: flex; flex-direction: column; gap: 3px; padding: 12px; border-radius: 10px; background: rgba(127,199,158,.06); }
+.nw-remote-address span,
+.nw-remote-address small { color: #77717f; font-size: 9px; }
+.nw-remote-address strong { color: #b8dec8; font-size: 12px; user-select: text; }
+.nw-remote-devices { overflow: hidden; border: 1px solid rgba(255,255,255,.06); border-radius: 10px; }
+.nw-remote-devices__heading,
+.nw-remote-device { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,.05); }
+.nw-remote-devices__heading strong,
+.nw-remote-device strong { font-size: 10px; color: #c9c4d5; }
+.nw-remote-devices__heading span { color: #77717f; font-size: 9px; }
+.nw-remote-device:last-child { border-bottom: 0; }
+.nw-remote-device > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.nw-remote-device small { color: #686271; font-size: 8px; }
+.nw-remote-empty { padding: 12px; }
+.nw-remote-panel > .nw-pairing-card { display: grid; grid-template-columns: 160px 1fr; gap: 18px; align-items: center; padding: 14px; border-radius: 12px; background: rgba(255,255,255,.025); }
+.nw-pairing-card img { width: 160px; height: 160px; border-radius: 8px; background: white; }
+.nw-pairing-card > div { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; }
+.nw-pairing-card strong { color: #e1dce8; font-size: 12px; }
+.nw-pairing-card span { color: #9d96a7; font-size: 10px; user-select: text; }
+.nw-pairing-card small { color: #6f6976; font-size: 9px; line-height: 1.45; }
+.nw-remote-panel > .nw-remote-actions { display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,.05); }
+@media (max-width: 900px) {
+  .nw-remote-panel > .nw-remote-enable-row { grid-template-columns: minmax(0,1fr) 100px; }
+  .nw-remote-enable-row .btn { grid-column: 1 / -1; justify-self: start; }
+  .nw-remote-panel > .nw-remote-overview { grid-template-columns: 1fr; }
+  .nw-remote-panel > .nw-pairing-card { grid-template-columns: 1fr; }
+}
+
 .nw-credentials-panel {
   align-items: stretch;
   flex-direction: column;

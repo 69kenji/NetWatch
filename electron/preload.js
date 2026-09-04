@@ -29,6 +29,17 @@ contextBridge.exposeInMainWorld('electron', {
     restartApp: () => ipcRenderer.invoke('runtime:restart-app'),
     onStatus: (callback) => subscribe('runtime:status', callback),
   },
+  remote: {
+    getStatus: () => ipcRenderer.invoke('remote:get-status'),
+    enable: (options) => ipcRenderer.invoke('remote:enable', options),
+    disable: () => ipcRenderer.invoke('remote:disable'),
+    beginPairing: () => ipcRenderer.invoke('remote:begin-pairing'),
+    cancelPairing: () => ipcRenderer.invoke('remote:cancel-pairing'),
+    revokeDevice: (deviceId) => ipcRenderer.invoke('remote:revoke-device', deviceId),
+    revokeAll: () => ipcRenderer.invoke('remote:revoke-all'),
+    regenerateIdentity: () => ipcRenderer.invoke('remote:regenerate-identity'),
+    onStatus: (callback) => subscribe('remote:status', callback),
+  },
   player: {
     openTorrent: (request) => ipcRenderer.invoke('player:open-torrent', request),
   },
