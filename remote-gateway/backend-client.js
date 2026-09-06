@@ -124,6 +124,85 @@ class BackendClient {
     backendRequest.end()
     return backendRequest
   }
+
+  streamAsset(pathname, remoteRequest, remoteResponse, {
+    maxBytes,
+    cacheControl = 'no-store',
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+  }) {
+    if (!/^\/api\/[A-Za-z0-9/._-]+$/u.test(pathname) || pathname.includes('..')) {
+      throw new Error('Backend asset path is not on the approved API surface')
+    }
+    if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error('Backend asset limit is invalid')
+
+    const assetError = (code, message) => Object.assign(new Error(message), { code })
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const settle = callback => value => {
+        if (settled) return
+        settled = true
+        callback(value)
+      }
+      const complete = settle(resolve)
+      const fail = settle(reject)
+      const backendRequest = http.request(`${this.baseUrl}${pathname}`, {
+        method: 'GET',
+        headers: { Accept: '*/*' },
+        timeout: timeoutMs,
+      }, backendResponse => {
+        if ((backendResponse.statusCode || 500) >= 400) {
+          backendResponse.resume()
+          fail(assetError('ASSET_NOT_FOUND', 'Requested content is unavailable'))
+          return
+        }
+        const declaredLength = Number(backendResponse.headers['content-length'] || 0)
+        if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+          backendResponse.destroy()
+          fail(assetError('ASSET_TOO_LARGE', 'Requested content exceeds the gateway limit'))
+          return
+        }
+        const headers = {
+          'content-type': String(backendResponse.headers['content-type'] || 'application/octet-stream'),
+          'cache-control': cacheControl,
+          'x-content-type-options': 'nosniff',
+        }
+        const length = backendResponse.headers['content-length']
+        if (typeof length === 'string') headers['content-length'] = length
+        remoteResponse.writeHead(200, headers)
+        let received = 0
+        backendResponse.on('data', chunk => {
+          received += chunk.length
+          if (received > maxBytes) {
+            backendResponse.destroy(assetError('ASSET_TOO_LARGE', 'Requested content exceeds the gateway limit'))
+            remoteResponse.destroy()
+          }
+        })
+        backendResponse.on('end', complete)
+        backendResponse.on('error', fail)
+        backendResponse.on('close', () => {
+          if (!backendResponse.complete) fail(assetError('ASSET_ABORTED', 'Asset response ended early'))
+        })
+        backendResponse.pipe(remoteResponse)
+      })
+      backendRequest.on('timeout', () => backendRequest.destroy(assetError('ASSET_TIMEOUT', 'Asset proxy timed out')))
+      backendRequest.on('error', fail)
+      remoteRequest.on('aborted', () => {
+        complete()
+        backendRequest.destroy()
+      })
+      remoteRequest.on('close', () => {
+        if (!remoteRequest.complete) {
+          complete()
+          backendRequest.destroy()
+        }
+      })
+      remoteResponse.on('close', () => {
+        complete()
+        backendRequest.destroy()
+      })
+      backendRequest.end()
+    })
+  }
 }
 
 module.exports = { BackendClient, BackendError, MAX_JSON_BYTES }

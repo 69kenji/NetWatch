@@ -3,6 +3,7 @@ const https = require('https')
 
 const { BackendClient, BackendError } = require('./backend-client')
 const { DeviceStore } = require('./state-store')
+const { selectAutomaticRelease } = require('./quality-policy')
 const {
   assertSafeResponse,
   isPrivateIpv4,
@@ -141,9 +142,11 @@ class RemoteGateway {
     this.backend = new BackendClient(config.backendBaseUrl)
     this.deviceStore = new DeviceStore(config.devicesPath)
     this.canCleanupTorrent = config.canCleanupTorrent || (async () => true)
+    this.keepWatching = config.keepWatching || null
     this.onEvent = config.onEvent || (() => {})
     this.pairing = null
     this.sessions = new Map()
+    this.latestProgressSession = new Map()
     this.torrentLeases = new Map()
     this.activeStreams = new Map()
     this.activeTorrentStreams = new Map()
@@ -188,6 +191,7 @@ class RemoteGateway {
       for (const connection of connections) connection.response.destroy()
     }
     await Promise.allSettled([...this.sessions.keys()].map(id => this.closeSession(id, null, { force: true })))
+    this.latestProgressSession.clear()
     if (this.server.listening) {
       await new Promise(resolve => this.server.close(() => resolve()))
     }
@@ -392,6 +396,12 @@ class RemoteGateway {
         return
       }
 
+      if (pathname.startsWith('/remote/v1/keep-watching')) {
+        this.requireRuntime()
+        await this.handleKeepWatching(request, response, url, device)
+        return
+      }
+
       this.requireRuntime()
       await this.handleCatalog(request, response, url, device)
     } catch (error) {
@@ -538,6 +548,126 @@ class RemoteGateway {
     return session
   }
 
+  async createPlaybackSession(device, { releaseRef, mediaName, historyTitle, catalog, season = null, episode = null }) {
+    const normalizedHistoryTitle = String(historyTitle || '').trim().slice(0, 240)
+    if (!/^[A-Za-z0-9_-]{32,128}$/u.test(releaseRef) || !mediaName || mediaName.length > 240 || !normalizedHistoryTitle) {
+      throw new RemoteError('INVALID_INPUT', 422, 'Playback request is invalid')
+    }
+    if (catalog.kind === 'movie' && (season !== null || episode !== null)) {
+      throw new RemoteError('INVALID_INPUT', 422, 'Movie playback cannot include episode context')
+    }
+    if (catalog.kind === 'tv' && (season === null || episode === null)) {
+      throw new RemoteError('INVALID_INPUT', 422, 'Episode playback requires season and episode')
+    }
+    const added = await this.backendInternalJson('POST', '/api/torrents/add', {
+      body: { release_ref: releaseRef, media_name: mediaName },
+      timeoutMs: 45_000,
+    })
+    const internalHash = String(added.hash || '').toLowerCase()
+    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(internalHash)) {
+      throw new RemoteError('PLAYBACK_NOT_READY', 503, 'Torrent engine returned an invalid session')
+    }
+    const sessionId = crypto.randomBytes(24).toString('base64url')
+    const session = {
+      id: sessionId,
+      deviceId: device.id,
+      infoHash: internalHash,
+      ownsTorrent: !added.already_existed,
+      catalogId: `${catalog.kind}:${catalog.id}`,
+      mediaName,
+      historyTitle: normalizedHistoryTitle,
+      season,
+      episode,
+      lastProgressSequence: -1,
+      createdAt: Date.now(),
+      lastActivity: Date.now(),
+      subtitleOptionRefs: new Map(),
+      subtitleRefs: new Map(),
+    }
+    this.sessions.set(sessionId, session)
+    this.latestProgressSession.set(`${device.id}:${session.catalogId}`, sessionId)
+    const lease = this.torrentLeases.get(internalHash) || { count: 0, owned: false }
+    lease.count += 1
+    lease.owned ||= session.ownsTorrent
+    this.torrentLeases.set(internalHash, lease)
+    return session
+  }
+
+  async hydrateKeepWatchingRecord(record) {
+    const catalog = parseCatalogId(record.catalog_id)
+    const details = await this.backendJson('GET', catalog.kind === 'movie'
+      ? `/api/metadata/movies/${catalog.id}`
+      : `/api/metadata/series/${catalog.id}`, { timeoutMs: 35_000 })
+    const payload = {
+      ...details,
+      catalog_id: record.catalog_id,
+      position_seconds: record.position_seconds,
+      duration_seconds: record.duration_seconds,
+      updated_at: record.updated_at,
+    }
+    if (catalog.kind === 'tv') {
+      payload.season = record.season
+      payload.episode = record.episode
+    }
+    assertSafeResponse(payload)
+    return payload
+  }
+
+  async handleKeepWatching(request, response, url, device) {
+    if (!this.keepWatching) throw new RemoteError('NOT_FOUND', 404, 'Keep Watching is unavailable')
+    this.rateLimit(`keep-watching:${device.id}`, 30, 60_000)
+    if (request.method === 'GET' && url.pathname === '/remote/v1/keep-watching') {
+      const state = await this.keepWatching.getState()
+      const records = state?.enabled && Array.isArray(state.items) ? state.items.slice(0, 20) : []
+      const hydrated = await Promise.all(records.map(record => this.hydrateKeepWatchingRecord(record).catch(() => null)))
+      this.sendJson(response, 200, {
+        enabled: Boolean(state?.enabled),
+        limit: Number(state?.limit) || 5,
+        items: hydrated.filter(Boolean),
+      })
+      return
+    }
+
+    const resume = /^\/remote\/v1\/keep-watching\/((?:movie|tv):[1-9]\d{0,8})\/playback$/u.exec(url.pathname)
+    if (request.method !== 'POST' || !resume) throw new RemoteError('METHOD_NOT_ALLOWED', 405, 'Method not allowed')
+    const body = await jsonBody(request)
+    if (Object.keys(body).length) throw new RemoteError('INVALID_INPUT', 422, 'Resume playback does not accept request fields')
+    this.rateLimit(`keep-watching-playback:${device.id}`, 6, 10 * 60_000)
+    const catalog = parseCatalogId(resume[1])
+    const record = await this.keepWatching.get(resume[1])
+    if (!record) throw new RemoteError('NOT_FOUND', 404, 'Keep Watching item is unavailable')
+    const details = await this.backendJson('GET', catalog.kind === 'movie'
+      ? `/api/metadata/movies/${catalog.id}`
+      : `/api/metadata/series/${catalog.id}`, { timeoutMs: 35_000 })
+    const season = catalog.kind === 'tv' ? boundedInteger(record.season, 'Season', 0, 9999) : null
+    const episode = catalog.kind === 'tv' ? boundedInteger(record.episode, 'Episode', 0, 9999) : null
+    const streamPath = catalog.kind === 'movie'
+      ? `/api/metadata/movies/${catalog.id}/stream-options?min_seeders=1`
+      : `/api/metadata/series/${catalog.id}/episodes/${season}/${episode}/stream-options?min_seeders=1${details.is_anime ? '&anime=true' : ''}`
+    const options = await this.backendInternalJson('GET', streamPath, { timeoutMs: 35_000 })
+    const selected = selectAutomaticRelease(options?.results, record.defaultQuality || 'all')
+    if (!selected) throw new RemoteError('NO_MATCHING_STREAMS', 404, 'No matching streams')
+    const session = await this.createPlaybackSession(device, {
+      releaseRef: selected.release_ref,
+      mediaName: String(record.title || details.title || '').slice(0, 240),
+      historyTitle: details.title,
+      catalog,
+      season,
+      episode,
+    })
+    const code = catalog.kind === 'tv'
+      ? ` · S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
+      : ''
+    this.sendJson(response, 201, {
+      session_id: session.id,
+      state: 'buffering',
+      catalog_id: session.catalogId,
+      resume_position_seconds: Number(record.position_seconds) || 0,
+      title: `${record.title}${code}`,
+      backdrop_path: details.player_backdrop || details.backdrop || null,
+    })
+  }
+
   async handlePlayback(request, response, url, device) {
     const pathname = url.pathname
     if (request.method === 'POST' && pathname === '/remote/v1/playback') {
@@ -546,47 +676,21 @@ class RemoteGateway {
       const body = await jsonBody(request)
       const releaseRef = String(body.release_ref || '').trim()
       const mediaName = String(body.media_name || '').trim()
-      if (!/^[A-Za-z0-9_-]{32,128}$/u.test(releaseRef) || !mediaName || mediaName.length > 240) {
-        throw new RemoteError('INVALID_INPUT', 422, 'Playback request is invalid')
-      }
       const catalog = parseCatalogId(body.catalog_id)
       const season = boundedInteger(body.season, 'Season', 0, 9999)
       const episode = boundedInteger(body.episode, 'Episode', 0, 9999)
-      if (catalog.kind === 'movie' && (season !== null || episode !== null)) {
-        throw new RemoteError('INVALID_INPUT', 422, 'Movie playback cannot include episode context')
-      }
-      if (catalog.kind === 'tv' && (season === null || episode === null)) {
-        throw new RemoteError('INVALID_INPUT', 422, 'Episode playback requires season and episode')
-      }
-      const added = await this.backendInternalJson('POST', '/api/torrents/add', {
-        body: { release_ref: releaseRef, media_name: mediaName },
-        timeoutMs: 45_000,
-      })
-      const internalHash = String(added.hash || '').toLowerCase()
-      if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(internalHash)) {
-        throw new RemoteError('PLAYBACK_NOT_READY', 503, 'Torrent engine returned an invalid session')
-      }
-      const sessionId = crypto.randomBytes(24).toString('base64url')
-      const session = {
-        id: sessionId,
-        deviceId: device.id,
-        infoHash: internalHash,
-        ownsTorrent: !added.already_existed,
-        catalogId: `${catalog.kind}:${catalog.id}`,
+      const details = await this.backendJson('GET', catalog.kind === 'movie'
+        ? `/api/metadata/movies/${catalog.id}`
+        : `/api/metadata/series/${catalog.id}`, { timeoutMs: 35_000 })
+      const session = await this.createPlaybackSession(device, {
+        releaseRef,
         mediaName,
+        historyTitle: details.title,
+        catalog,
         season,
         episode,
-        createdAt: Date.now(),
-        lastActivity: Date.now(),
-        subtitleOptionRefs: new Map(),
-        subtitleRefs: new Map(),
-      }
-      this.sessions.set(sessionId, session)
-      const lease = this.torrentLeases.get(internalHash) || { count: 0, owned: false }
-      lease.count += 1
-      lease.owned ||= session.ownsTorrent
-      this.torrentLeases.set(internalHash, lease)
-      this.sendJson(response, 201, { session_id: sessionId, state: 'buffering', catalog_id: session.catalogId })
+      })
+      this.sendJson(response, 201, { session_id: session.id, state: 'buffering', catalog_id: session.catalogId })
       return
     }
 
@@ -610,6 +714,51 @@ class RemoteGateway {
         connected_peers: Number(status.peers || 0) + Number(status.seeds || 0),
         message: String(status.message || ''),
       })
+      return
+    }
+
+    if (request.method === 'PUT' && suffix === '/progress') {
+      this.rateLimit(`playback-progress:${device.id}`, 20, 60_000)
+      const body = await jsonBody(request)
+      const position = Number(body.position_seconds)
+      const duration = Number(body.duration_seconds)
+      const sequence = body.update_sequence === undefined
+        ? null
+        : boundedInteger(body.update_sequence, 'Progress sequence', 0, 2_147_483_647)
+      if (!Number.isFinite(position) || position < 0 || !Number.isFinite(duration) || duration <= 0 || duration > 7 * 24 * 60 * 60 || position > duration + 5) {
+        throw new RemoteError('INVALID_INPUT', 422, 'Playback progress is invalid')
+      }
+      const latestSession = this.latestProgressSession.get(`${device.id}:${session.catalogId}`)
+      if (latestSession && latestSession !== session.id) {
+        this.sendJson(response, 200, { recorded: false, stale: true })
+        return
+      }
+      if (sequence !== null && sequence <= session.lastProgressSequence) {
+        this.sendJson(response, 200, { recorded: false, stale: true })
+        return
+      }
+      if (sequence !== null) session.lastProgressSequence = sequence
+      const checkpoint = await this.keepWatching?.checkpoint({
+        catalogId: session.catalogId,
+        title: session.historyTitle,
+        season: session.season,
+        episode: session.episode,
+        positionSeconds: Math.min(position, duration),
+        durationSeconds: duration,
+      })
+      if (process.env.NETWATCH_DEBUG_PROGRESS === '1') {
+        console.info('[RemoteProgress]', {
+          device: sha256Base64Url(device.id).slice(0, 4).toUpperCase(),
+          media: session.catalogId,
+          episode: session.season === null ? null : `${session.season}:${session.episode}`,
+          session: session.id.slice(0, 8),
+          sequence,
+          position: Math.round(position),
+          duration: Math.round(duration),
+          recorded: Boolean(checkpoint?.changed),
+        })
+      }
+      this.sendJson(response, 200, { recorded: Boolean(checkpoint?.changed) })
       return
     }
 
@@ -733,49 +882,19 @@ class RemoteGateway {
     })
   }
 
-  pipeBackendAsset(request, response, backendPath) {
-    return new Promise((resolve, reject) => {
-      const backendRequest = require('http').request(`${this.backend.baseUrl}${backendPath}`, {
-        method: 'GET',
-        headers: { Accept: '*/*' },
-        timeout: 35_000,
-      }, backendResponse => {
-        if ((backendResponse.statusCode || 500) >= 400) {
-          backendResponse.resume()
-          reject(new RemoteError('NOT_FOUND', 404, 'Requested content is unavailable'))
-          return
-        }
-        const declaredLength = Number(backendResponse.headers['content-length'] || 0)
-        if (Number.isFinite(declaredLength) && declaredLength > MAX_ASSET_BYTES) {
-          backendResponse.destroy()
-          reject(new RemoteError('RESPONSE_TOO_LARGE', 502, 'Requested content exceeds the gateway limit'))
-          return
-        }
-        const headers = {
-          'content-type': String(backendResponse.headers['content-type'] || 'application/octet-stream'),
-          'cache-control': backendPath.startsWith('/api/metadata/image/') ? 'private, max-age=86400' : 'no-store',
-          'x-content-type-options': 'nosniff',
-        }
-        const length = backendResponse.headers['content-length']
-        if (typeof length === 'string') headers['content-length'] = length
-        response.writeHead(200, headers)
-        let received = 0
-        backendResponse.on('data', chunk => {
-          received += chunk.length
-          if (received > MAX_ASSET_BYTES) {
-            backendResponse.destroy(new Error('Asset response exceeds the gateway limit'))
-            response.destroy()
-          }
-        })
-        backendResponse.pipe(response)
-        backendResponse.on('end', resolve)
-        backendResponse.on('error', reject)
+  async pipeBackendAsset(request, response, backendPath) {
+    try {
+      await this.backend.streamAsset(backendPath, request, response, {
+        maxBytes: MAX_ASSET_BYTES,
+        timeoutMs: 35_000,
+        cacheControl: backendPath.startsWith('/api/metadata/image/') ? 'private, max-age=86400' : 'no-store',
       })
-      backendRequest.on('timeout', () => backendRequest.destroy(new Error('Asset proxy timed out')))
-      backendRequest.on('error', reject)
-      request.on('aborted', () => backendRequest.destroy())
-      backendRequest.end()
-    })
+    } catch (error) {
+      if (error?.code === 'ASSET_NOT_FOUND') throw new RemoteError('NOT_FOUND', 404, 'Requested content is unavailable')
+      if (error?.code === 'ASSET_TOO_LARGE') throw new RemoteError('RESPONSE_TOO_LARGE', 502, 'Requested content exceeds the gateway limit')
+      if (error?.code === 'ASSET_TIMEOUT') throw new RemoteError('RUNTIME_NOT_READY', 503, 'The protected runtime did not respond in time')
+      throw error
+    }
   }
 
   async closeSession(sessionId, deviceId, { force = false } = {}) {

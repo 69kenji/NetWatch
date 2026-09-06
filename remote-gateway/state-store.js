@@ -1,6 +1,6 @@
 const fs = require('fs')
 const path = require('path')
-const { timingSafeTextEqual } = require('./security')
+const { normalizeDeviceName, sha256Base64Url, timingSafeTextEqual } = require('./security')
 
 const DEVICE_SCHEMA_VERSION = 1
 const MAX_DEVICES = 64
@@ -27,7 +27,9 @@ class DeviceStore {
           .slice(0, MAX_DEVICES)
           .map(item => ({
             id: item.id,
-            name: String(item.name || 'Android device').slice(0, 80),
+            name: (() => {
+              try { return normalizeDeviceName(item.name || 'Android device') } catch (_) { return 'Android device' }
+            })(),
             credential_hash: item.credential_hash,
             paired_at: item.paired_at || null,
             last_seen: item.last_seen || null,
@@ -48,7 +50,10 @@ class DeviceStore {
   }
 
   listPublic() {
-    return this.state.devices.map(({ credential_hash: _credentialHash, ...device }) => ({ ...device }))
+    return this.state.devices.map(({ credential_hash: _credentialHash, ...device }) => ({
+      ...device,
+      fingerprint: sha256Base64Url(device.id).slice(0, 4).toUpperCase(),
+    }))
   }
 
   add(device) {

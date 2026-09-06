@@ -299,7 +299,7 @@ class SubtitleService:
         # Keep provider diversity in the public 40-row response. Previously all
         # OpenSubtitles rows were sorted before SubDL and then the result was
         # truncated to 40; a normal 40-row OpenSubtitles response therefore hid
-        # every valid SubDL result from the UI and smoke test.
+        # every valid SubDL result from the UI.
         open_rows = dedupe_provider(open_rows)
         subdl_rows = dedupe_provider(subdl_rows)
 

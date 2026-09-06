@@ -1,6 +1,6 @@
 {
   "name": "netwatch",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "description": "Self-hosted Windows media client with a Docker/VPN-isolated runtime",
   "license": "GPL-3.0-only",
   "main": "electron/main.js",
@@ -8,7 +8,6 @@
     "dev": "concurrently \"npm run dev:react\" \"npm run dev:electron\"",
     "dev:react": "vite",
     "build:renderer": "vite build",
-    "test:gateway": "node --test remote-gateway/test/*.test.js",
     "dev:electron": "wait-on http://localhost:5173 && electron .",
     "build": "npm run package:win",
     "docker:up": "docker compose -f docker/docker-compose.yml up -d",
@@ -43,7 +42,6 @@
       "dist/**/*",
       "electron/**/*",
       "remote-gateway/**/*",
-      "!remote-gateway/test/**/*",
       "package.json"
     ],
     "extraResources": [
@@ -70,6 +68,10 @@
         ]
       },
       {
+        "from": "build/netwatch.ico",
+        "to": "tray/netwatch.ico"
+      },
+      {
         "from": "backend",
         "to": "runtime-template/backend",
         "filter": [
@@ -77,9 +79,7 @@
           "!.env",
           "!__pycache__/**",
           "!*.pyc",
-          "!*.pyo",
-          "!test_*.py",
-          "!scripts/**"
+          "!*.pyo"
         ]
       },
       {
@@ -89,8 +89,7 @@
           "**/*",
           "!__pycache__/**",
           "!*.pyc",
-          "!*.pyo",
-          "!test_*.py"
+          "!*.pyo"
         ]
       },
       {
@@ -101,8 +100,7 @@
           "!prowlarr/config/**",
           "!wireguard/wg_confs/wg0.conf",
           "!**/*.db",
-          "!**/*.log",
-          "!test_secure_config.py"
+          "!**/*.log"
         ]
       },
       {

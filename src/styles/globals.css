@@ -1117,6 +1117,33 @@ textarea:focus-visible {
   text-transform: uppercase;
 }
 
+.nw-keep-watching-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.nw-keep-watching-progress > span {
+  display: block;
+  height: 100%;
+  background: #8058ff;
+}
+
+.nw-keep-watching-status {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── Series / anime episode detail view ───────────────────────────────── */
 .nw-series-browser {
   width: min(1220px, calc(100% - 56px));
@@ -1659,8 +1686,8 @@ body, button, input, select, textarea {
 
 .nw-home-feed {
   width: 100%;
-  max-width: 1520px;
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
   display: flex;
   flex-direction: column;
   gap: 30px;

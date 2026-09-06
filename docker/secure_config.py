@@ -369,10 +369,10 @@ def validate_endpoint(value: str) -> str:
     value = value.strip()
     if not value or any(ch.isspace() for ch in value):
         raise ConfigError("WG_ENDPOINT_INVALID", "The WireGuard endpoint is invalid.")
-    # NetWatch 1.0 intentionally supports IPv4 transport only. Bracketed IPv6
+    # NetWatch supports IPv4 transport only. Bracketed IPv6
     # endpoints are therefore rejected rather than silently changing semantics.
     if value.startswith("["):
-        raise ConfigError("WG_IPV6_UNSUPPORTED", "NetWatch 1.0 supports IPv4 WireGuard configurations only.")
+        raise ConfigError("WG_IPV6_UNSUPPORTED", "NetWatch supports IPv4 WireGuard configurations only.")
     host, sep, port_text = value.rpartition(":")
     if not sep or not host or not port_text.isdigit():
         raise ConfigError("WG_ENDPOINT_INVALID", "The WireGuard endpoint must include a host and UDP port.")
@@ -382,15 +382,15 @@ def validate_endpoint(value: str) -> str:
     try:
         parsed = ipaddress.ip_address(host)
     except ValueError as exc:
-        # NetWatch 1.0 requires a literal IPv4 relay endpoint. Resolving a
+        # NetWatch requires a literal IPv4 relay endpoint. Resolving a
         # provider hostname before wg0 exists would introduce bootstrap DNS
         # outside the authoritative inner tunnel and weaken the DNS invariant.
         raise ConfigError(
             "WG_ENDPOINT_HOSTNAME_UNSUPPORTED",
-            "NetWatch 1.0 requires a literal IPv4 WireGuard endpoint.",
+            "NetWatch requires a literal IPv4 WireGuard endpoint.",
         ) from exc
     if parsed.version != 4:
-        raise ConfigError("WG_IPV6_UNSUPPORTED", "NetWatch 1.0 supports IPv4 WireGuard configurations only.")
+        raise ConfigError("WG_IPV6_UNSUPPORTED", "NetWatch supports IPv4 WireGuard configurations only.")
     return f"{parsed}:{port}"
 
 

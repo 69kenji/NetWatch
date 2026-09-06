@@ -28,12 +28,13 @@ Torrent, metadata, subtitle, and indexer traffic runs inside a shared Docker/WSL
 ## Features
 
 - Home, Discover, and search for movies, TV, and anime through TMDB.
-- Torrent discovery through your Prowlarr indexers, with bundled FlareSolverr support for indexers that need it.
+- Optional AniList title, movie, OVA, and installment data for anime release matching; TMDB supplies the catalog.
+- Torrent discovery through your Prowlarr indexers, with optional bundled FlareSolverr support for indexers that need it.
 - Direct libtorrent streaming with seek-aware buffering.
 - Native mpv playback with fullscreen, seeking, audio tracks, subtitles, buffering, and network stats.
 - Optional OpenSubtitles and SubDL integration.
 - Inner WireGuard routing with fail-closed startup checks, VPN-side DNS, and optional VPNBook profile reminders.
-- Opt-in, TLS-pinned LAN streaming to the Android thin client; the PC remains the torrent and VPN authority.
+- Opt-in, TLS-pinned LAN streaming to the Android client; the PC handles torrents and VPN routing.
 
 ## Screenshots
 
@@ -55,7 +56,7 @@ Torrent, metadata, subtitle, and indexer traffic runs inside a shared Docker/WSL
 
 ## Requirements
 
-NetWatch 1.0 supports **x64/AMD64 Windows 11 23H2 (build 22631) or newer**.
+NetWatch supports **x64/AMD64 Windows 11 23H2 (build 22631) or newer**.
 
 You need:
 
@@ -70,7 +71,7 @@ Optional subtitle providers:
 - OpenSubtitles: 32-character API key.
 - SubDL: `subdl_` plus a 43-character key suffix. NetWatch supplies the `subdl_` prefix in the UI.
 
-The installer can help install or enable WSL, Ubuntu, and Docker Desktop. Launch Setup normally; do not use **Run as administrator**. Only the WSL servicing step requests UAC when needed.
+The installer can help install or enable WSL, Ubuntu, and Docker Desktop. Launch Setup normally; only the WSL servicing step requests UAC when needed.
 
 ## First run
 
@@ -82,9 +83,7 @@ The installer can help install or enable WSL, Ubuntu, and Docker Desktop. Launch
 
 OpenSubtitles and SubDL can be added or replaced later in **Settings**. Settings shows only whether a key is configured; stored key values are never displayed.
 
-NetWatch rewrites imported WireGuard profiles into its managed format. Provider command hooks are rejected, a full IPv4 tunnel (`0.0.0.0/0`) is required, and the profile must provide an IPv4 DNS resolver.
-
-VPNBook uses the same WireGuard path as any other provider. Its profile-expiry estimate is only a reminder.
+NetWatch rewrites imported WireGuard profiles into its managed format. It rejects provider command hooks and requires a full IPv4 tunnel (`0.0.0.0/0`) with an IPv4 DNS resolver. VPNBook uses the same path as other WireGuard profiles; its expiry estimate is only a reminder.
 
 Private state is stored in the selected WSL distribution under:
 
@@ -94,21 +93,20 @@ Private state is stored in the selected WSL distribution under:
 
 Normal reinstall/upgrade preserves this state.
 
-### Upgrade note
-
-Upgrades preserve existing API credentials. Users upgrading from 1.0.4 or earlier may be asked to re-import their provider WireGuard `.conf` once because the managed firewall format changed in 1.0.5. Re-import the original provider profile rather than copying an old NetWatch-managed `wg0.conf`. Missing optional subtitle keys do not reopen first-run setup.
+Upgrades preserve existing API credentials. Users upgrading from 1.0.4 or earlier may need to re-import the original provider WireGuard configuration once because the managed firewall format changed in 1.0.5.
 
 ## Prowlarr and FlareSolverr
 
-NetWatch uses Prowlarr as its only indexer interface. Configure indexers in Prowlarr, not in NetWatch.
+NetWatch uses Prowlarr as its only indexer interface. Configure indexers there. FlareSolverr is off by default; enable it in NetWatch Settings only for indexers that require it, then assign its Prowlarr proxy tag to those indexers.
 
-For Cloudflare-protected indexers, the bundled FlareSolverr service is available to Prowlarr at:
+## Resource usage
 
-```text
-http://127.0.0.1:8191
-```
+Settings provides two resource profiles:
 
-Assign the same Prowlarr proxy tag to the indexers that should use it.
+- **Standard** keeps the normal torrent concurrency, lookahead, connection limits, and 8 GiB torrent-buffer ceiling.
+- **Reduced** lowers those limits and uses a 4 GiB torrent-buffer ceiling for systems with limited memory.
+
+The buffer value is a maximum tmpfs size, not memory reserved at startup. Reduced mode trades concurrency and seek headroom for lower peak memory use. Prowlarr is required in both profiles; FlareSolverr runs only when enabled.
 
 ## Build from source
 
@@ -136,75 +134,25 @@ npm run package:win
 Output:
 
 ```text
-release\NetWatch-Setup-1.0.9.exe
+release\NetWatch-Setup-1.1.0.exe
 ```
 
-Use `npm ci` for reproducible builds. See [`packaging/PACKAGING.md`](packaging/PACKAGING.md) for Windows packaging details.
+See [`packaging/PACKAGING.md`](packaging/PACKAGING.md) for release details.
 
 ## Source development
 
-Private source-mode configuration is ignored by Git:
+Git ignores private source configuration in `backend/.env`, `docker/wireguard/wg_confs/wg0.conf`, and `docker/prowlarr/config/`.
 
-```text
-backend/.env
-docker/wireguard/wg_confs/wg0.conf
-docker/prowlarr/config/
-```
-
-When running Electron from a Windows checkout, point it at the matching WSL path:
-
-```powershell
-$env:NETWATCH_WSL_DISTRO = "Ubuntu"
-$env:NETWATCH_WSL_PROJECT_PATH = "/mnt/c/NetWatchBuild/netwatch"
-npx electron .
-```
-
-Start the source Compose stack from WSL:
+Run the Compose stack and network check from WSL:
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d
 python3 docker/verify-networking.py
 ```
 
-Treat the shared VPN namespace as a unit; do not recreate only the VPN container while leaving dependent services attached to the old namespace.
-
-## Tests
-
-Backend:
-
-```bash
-python3 -m unittest discover -s backend -p 'test_*.py'
-```
-
-Torrent engine:
-
-```bash
-python3 -m unittest -v torrent-engine/test_engine.py
-```
-
-Remote gateway:
-
-```powershell
-npm run test:gateway
-```
-
-Android (JDK 17 and Android API 37 SDK required):
-
-```powershell
-cd android
-.\gradlew.bat testDebugUnitTest assembleDebug
-```
-
-
-Configured-environment smoke scripts are under `backend/scripts/`. Some make real provider, indexer, or torrent requests.
+Treat the shared VPN namespace as a unit. Do not recreate only the VPN container while dependent services remain attached to the old namespace. The Android client is maintained in the separate [NetWatch Android repository](https://github.com/69kenji/NetWatch-Android).
 
 ## Troubleshooting
-
-**Prerequisite setup was interrupted**  
-Let any trusted Microsoft, Ubuntu, or Docker installer already running finish, then use **Refresh checks**. Do not disable endpoint protection for NetWatch.
-
-**Prowlarr is not ready**  
-Open Prowlarr, finish its setup, configure at least one indexer, and enter its API key in NetWatch.
 
 **VPN or DNS verification fails**  
 Run:
@@ -215,11 +163,7 @@ wsl -d Ubuntu -- sh -lc 'cd ~/.local/share/netwatch/runtime && python3 docker/ve
 
 Replace `Ubuntu` if NetWatch uses another distribution.
 
-**The Windows host VPN changed while NetWatch was running**  
-Restart NetWatch. Host-VPN changes can interrupt Docker/WSL networking.
-
-**Packaging fails from a WSL UNC path**  
-Move the checkout to Windows NTFS and rerun `npm ci` and the packaging command.
+Restart NetWatch after changing a host VPN. Build only from a Windows NTFS checkout.
 
 ## Security and privacy
 

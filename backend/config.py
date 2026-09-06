@@ -6,6 +6,8 @@ class Settings(BaseSettings):
 
     # External metadata / subtitle providers.
     TMDB_API_KEY: str = ""
+    ANILIST_ENRICHMENT_ENABLED: bool = False
+    ANILIST_TIMEOUT_SECS: float = 4.0
     OPENSUBTITLES_API_KEY: str = ""
     SUBDL_API_KEY: str = ""
 

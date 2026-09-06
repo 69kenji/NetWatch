@@ -20,7 +20,7 @@ export type QualityFilter = 'all' | '2160p' | '1080p' | '720p'
 
 const RESOLUTION_WEIGHT: Record<string, number> = {
   '2160p': 4,
-  '4K': 4,
+  '4k': 4,
   '1080p': 3,
   '720p': 2,
   '480p': 1,
@@ -56,8 +56,18 @@ export function formatBytes(bytes = 0) {
 
 
 function resolutionWeight(result: TorrentSearchResult) {
-  const resolution = result.resolution || ''
+  const resolution = (result.resolution || '').trim().toLowerCase()
   return RESOLUTION_WEIGHT[resolution] || 0
+}
+
+export function selectAutomaticResult(results: TorrentSearchResult[], ceiling: QualityFilter) {
+  const maximum = ceiling === 'all' ? Number.POSITIVE_INFINITY : RESOLUTION_WEIGHT[ceiling] || 0
+  if (ceiling !== 'all' && !maximum) return null
+  return results.find(result => {
+    const weight = resolutionWeight(result)
+    return /^[A-Za-z0-9_-]{32,128}$/u.test(resultSource(result)) &&
+      (ceiling === 'all' || (weight > 0 && weight <= maximum))
+  }) || null
 }
 
 export function sortResults(results: TorrentSearchResult[], mode: ResultSort) {

@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
 
 from services.exceptions import DependencyUnavailableError
+from services.anilist import AniListService
 from services.flaresolverr import FlareSolverrService
 from services.privacy import PrivacyService
 from services.prowlarr import ProwlarrService
@@ -61,6 +62,13 @@ async def prowlarr_status():
 @router.get("/flaresolverr")
 async def flaresolverr_status():
     return await FlareSolverrService.health_check()
+
+
+@router.get("/anilist")
+async def anilist_status():
+    # This reports configuration without spending a public API request merely to
+    # open Diagnostics. Actual lookup failures are reported with episode results.
+    return await AniListService.health_check()
 
 
 @router.get("/dependencies")

@@ -42,6 +42,29 @@ def _prefer(candidate: dict, current: dict) -> bool:
 
 
 class ReleaseSearchService:
+    @staticmethod
+    def merge(items: list[dict], max_results: int = 50) -> list[dict]:
+        """Deduplicate already-sanitized results from bounded fallback queries."""
+        merged: dict[tuple[str, int], list[dict]] = {}
+        for item in items:
+            key = _dedupe_key(item)
+            bucket = merged.setdefault(key, [])
+            match_index = next(
+                (index for index, existing in enumerate(bucket) if _can_dedupe(item, existing)),
+                None,
+            )
+            if match_index is None:
+                bucket.append(item)
+            elif _prefer(item, bucket[match_index]):
+                bucket[match_index] = item
+
+        results = [item for bucket in merged.values() for item in bucket]
+        results.sort(key=lambda item: (
+            _RESOLUTION_ORDER.get(str(item.get("resolution") or "Unknown"), 4),
+            -int(item.get("seeders") or 0),
+        ))
+        return results[:max_results]
+
     @classmethod
     async def search(
         cls,
@@ -64,30 +87,13 @@ class ReleaseSearchService:
             max_results=max_results,
         )
 
-        merged: dict[tuple[str, int], list[dict]] = {}
-        for item in raw:
-            key = _dedupe_key(item)
-            bucket = merged.setdefault(key, [])
-            match_index = next(
-                (index for index, existing in enumerate(bucket) if _can_dedupe(item, existing)),
-                None,
-            )
-            if match_index is None:
-                bucket.append(item)
-            elif _prefer(item, bucket[match_index]):
-                bucket[match_index] = item
-
-        results = [item for bucket in merged.values() for item in bucket]
-        results.sort(key=lambda item: (
-            _RESOLUTION_ORDER.get(str(item.get("resolution") or "Unknown"), 4),
-            -int(item.get("seeders") or 0),
-        ))
+        results = cls.merge(raw, max_results=max_results)
 
         # Provider download URLs stay backend-only. Prowlarr grab URLs can carry
         # its API key in the query string, so never serialize source_url/magnet
         # into a response consumed by Electron/React.
         serialized: list[dict] = []
-        for item in results[:max_results]:
+        for item in results:
             source_url = str(item.get("source_url") or "").strip()
             if not source_url:
                 continue

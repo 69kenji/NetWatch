@@ -59,7 +59,10 @@ services:
       - NETWATCH_VPN_INTERFACE=wg0
       - NETWATCH_LISTEN_PORT=6881
       - NETWATCH_UPLOAD_LIMIT=65536
-      - NETWATCH_RANGE_LOOKAHEAD_BYTES=33554432
+      - NETWATCH_RANGE_LOOKAHEAD_BYTES=${NETWATCH_RANGE_LOOKAHEAD_BYTES:-33554432}
+      - NETWATCH_ACTIVE_DOWNLOADS=${NETWATCH_ACTIVE_DOWNLOADS:-8}
+      - NETWATCH_ACTIVE_LIMIT=${NETWATCH_ACTIVE_LIMIT:-16}
+      - NETWATCH_CONNECTIONS_LIMIT=${NETWATCH_CONNECTIONS_LIMIT:-500}
       - NETWATCH_DEADLINE_STEP_MS=250
       - NETWATCH_RANGE_POLL_MS=100
     volumes:
@@ -90,6 +93,7 @@ services:
     restart: unless-stopped
 
   flaresolverr:
+    profiles: ["flaresolverr"]
     # Build the exact FlareSolverr v3.5.0 source revision against current
     # Debian security packages instead of using the stale prebuilt release image.
     image: netwatch-flaresolverr:3.5.0-4ca91a2
@@ -169,6 +173,7 @@ services:
       - PROWLARR_URL=http://127.0.0.1:9696
       - FLARESOLVERR_URL=http://127.0.0.1:8191
       - NETWATCH_CACHE_DIR=/var/lib/netwatch/cache
+      - ANILIST_ENRICHMENT_ENABLED=true
     env_file:
       - ../../config/backend.env
     volumes:
@@ -184,8 +189,9 @@ services:
 
 volumes:
   nw_downloads:
+    name: "nw_downloads_${NETWATCH_RESOURCE_PROFILE:-standard}"
     driver: local
     driver_opts:
       type: tmpfs
       device: tmpfs
-      o: "size=8g,uid=1000"
+      o: "size=${NETWATCH_TMPFS_SIZE:-8g},uid=1000"

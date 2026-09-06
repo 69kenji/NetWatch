@@ -75,7 +75,35 @@ interface NativePlayerSession {
   infoHash: string | null
   filePath: string | null
   mediaItem: import('./store').MediaItem | null
+  resumePositionSeconds?: number
+  resumePending?: boolean
   openedAt: string
+}
+
+interface NetWatchAppSettings {
+  version: number
+  onClose: 'minimize-to-tray' | 'exit'
+  keepWatchingEnabled: boolean
+  keepWatchingLimit: number
+  defaultQuality: import('./types/torrents').QualityFilter
+  flareSolverrEnabled: boolean
+  resourceProfile: 'standard' | 'reduced'
+}
+
+interface NetWatchKeepWatchingItem {
+  catalog_id: string
+  title: string
+  season?: number
+  episode?: number
+  position_seconds: number
+  duration_seconds: number
+  updated_at: string
+}
+
+interface NetWatchKeepWatchingState {
+  enabled: boolean
+  limit: number
+  items: NetWatchKeepWatchingItem[]
 }
 
 type NativePlayerAction =
@@ -152,6 +180,7 @@ interface NetWatchRemoteInterface {
 interface NetWatchRemoteDevice {
   id: string
   name: string
+  fingerprint?: string
   paired_at?: string | null
   last_seen?: string | null
   revoked: boolean
@@ -186,6 +215,14 @@ interface Window {
       minimize: () => void
       maximize: () => void
       close: () => void
+    }
+    settings: {
+      get: () => Promise<NetWatchAppSettings>
+      update: (patch: Partial<Omit<NetWatchAppSettings, 'version'>>) => Promise<{ cancelled: boolean; settings: NetWatchAppSettings }>
+    }
+    keepWatching: {
+      getState: () => Promise<NetWatchKeepWatchingState>
+      onChanged: (callback: (state: NetWatchKeepWatchingState) => void) => () => void
     }
     runtime: {
       getStatus: () => Promise<NetWatchRuntimeStatus>
@@ -223,6 +260,7 @@ interface Window {
         mediaName?: string | null
         expectedHash?: string | null
         mediaItem?: import('./store').MediaItem | null
+        resumePositionSeconds?: number
       }) => Promise<{
         session: NativePlayerSession
         state: NativePlayerState

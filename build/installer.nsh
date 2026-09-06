@@ -461,7 +461,7 @@ Function NetWatchUpdatePreflightControls
   ${If} $NetWatchArchitectureSupported == "1"
     StrCpy $0 "$0$\r$\nArchitecture: x64 ($NetWatchWinArchitecture)"
   ${Else}
-    StrCpy $0 "$0$\r$\nArchitecture: UNSUPPORTED ($NetWatchWinArchitecture; NetWatch 1.0 requires x64/AMD64)"
+    StrCpy $0 "$0$\r$\nArchitecture: UNSUPPORTED ($NetWatchWinArchitecture; NetWatch requires x64/AMD64)"
   ${EndIf}
 
   ${If} $NetWatchProbeOk != "1"
@@ -547,7 +547,7 @@ Function NetWatchUpdatePreflightControls
   ${NSD_SetText} $NetWatchStatusLabel "$0"
 
   ; Unsupported Windows/architecture is still a hard gate, but edition is not.
-  ; Windows 11 Home can use NetWatch's WSL2/Linux-container path. NetWatch 1.0
+  ; Windows 11 Home can use NetWatch's WSL2/Linux-container path. NetWatch
   ; ships an x64 Windows/Electron/mpv stack, so ARM64 is deliberately deferred.
   ${If} $NetWatchWindowsSupported != "1"
     ${NSD_SetText} $NetWatchWslButton "Unsupported Windows"
@@ -777,7 +777,7 @@ FunctionEnd
 
 Function NetWatchPreflightPageLeave
   ${If} $NetWatchWindowsSupported != "1"
-    MessageBox MB_OK|MB_ICONSTOP "NetWatch 1.0 requires an x64 (AMD64) Windows 11 desktop/client installation at build 22631 (23H2) or newer. Home, Pro, Enterprise, and Education are accepted when the WSL2/Docker capability checks pass. ARM64 is not supported by this 1.0 build."
+    MessageBox MB_OK|MB_ICONSTOP "NetWatch requires an x64 (AMD64) Windows 11 desktop/client installation at build 22631 (23H2) or newer. Home, Pro, Enterprise, and Education are accepted when the WSL2/Docker capability checks pass. ARM64 is not supported."
     Abort
   ${EndIf}
   ${If} $NetWatchAllPrereqsReady != "1"

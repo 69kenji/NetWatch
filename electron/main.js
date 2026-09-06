@@ -1,4 +1,4 @@
-const { app, BaseWindow, BrowserWindow, dialog, ipcMain, net, protocol, session, shell } = require('electron')
+const { app, BaseWindow, BrowserWindow, dialog, ipcMain, Menu, net, protocol, session, shell, Tray } = require('electron')
 const path = require('path')
 const { pathToFileURL } = require('url')
 const { spawn } = require('child_process')
@@ -8,16 +8,20 @@ const { METADATA_PREPARATION_TIMEOUT_MS, metadataPreparationTimedOut } = require
 const { playerFullscreenShortcutAction } = require('./player-shortcuts')
 const { VPNBOOK_REFRESH_URL, normalizeVpnProfileType, wireGuardFileTimestamps } = require('./vpn-profile')
 const { RemoteGatewayController } = require('./remote-gateway-controller')
+const { AppSettingsStore } = require('./app-settings-store')
+const { KeepWatchingStore } = require('./keep-watching-store')
+const { shouldMinimizeOnClose } = require('./window-lifecycle-policy')
+const { composeRuntimeEnvironment } = require('./resource-profile')
 
 protocol.registerSchemesAsPrivileged([{
   scheme: 'app',
   privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true },
 }])
 
-// Keep this copied development Electron build away from Electron's shared/default
-// cache directories. Multiple local Electron copies can otherwise contend for the
-// same cache and emit Access denied / GPU cache errors before the app even loads.
-if (process.env.LOCALAPPDATA) {
+const isDev = !app.isPackaged
+
+// Keep development builds away from the installed application's data and cache.
+if (isDev && process.env.LOCALAPPDATA) {
   try {
     const devDataRoot = path.join(process.env.LOCALAPPDATA, 'NetWatchDev', 'UserData')
     const devCacheRoot = path.join(process.env.LOCALAPPDATA, 'NetWatchDev', 'Cache')
@@ -30,14 +34,10 @@ if (process.env.LOCALAPPDATA) {
   }
 }
 
-const isDev = !app.isPackaged || process.env.NODE_ENV === 'development'
-const isPlayerSmokeMode = isDev && Boolean(
-  process.env.NETWATCH_PLAYER_TEST_TORRENT_SOURCE || process.env.NETWATCH_PLAYER_TEST_SOURCE,
-)
-// Normal desktop launch uses a built renderer and no localhost dev-server port.
-// The established player smoke harness keeps using its externally-owned Vite server.
-const useViteDevServer = isDev && (process.env.NETWATCH_USE_VITE_DEV_SERVER === '1' || isPlayerSmokeMode)
-const BACKEND_BASE_URL = (process.env.NETWATCH_BACKEND_URL || 'http://127.0.0.1:8000').replace(/\/+$/u, '')
+const useViteDevServer = isDev && process.env.NETWATCH_USE_VITE_DEV_SERVER === '1'
+const BACKEND_BASE_URL = isDev
+  ? (process.env.NETWATCH_BACKEND_URL || 'http://127.0.0.1:8000').replace(/\/+$/u, '')
+  : 'http://127.0.0.1:8000'
 const PREPARATION_POLL_MS = 400
 const PREPARATION_REANNOUNCE_MS = 10_000
 const PLAYER_TELEMETRY_POLL_MS = 1000
@@ -66,8 +66,30 @@ let prowlarrSetupWindow = null
 let setupVpnVerified = false
 let firstRunTransitionPromise = null
 let remoteGateway = null
+let tray = null
+let lastKeepWatchingCheckpointAt = 0
+
+const appSettings = new AppSettingsStore(path.join(app.getPath('userData'), 'app-settings-v1.json'))
+const keepWatching = new KeepWatchingStore(
+  path.join(app.getPath('userData'), 'keep-watching-v1.json'),
+  () => appSettings.get(),
+  items => sendKeepWatchingChanged(items),
+)
 
 const mpv = new MpvController()
+
+function foregroundNetWatch() {
+  if (playerOverlayWindow && !playerOverlayWindow.isDestroyed()) {
+    if (playerVideoWindow && !playerVideoWindow.isDestroyed() && playerVideoWindow.isMinimized()) playerVideoWindow.restore()
+    playerOverlayWindow.show()
+    playerOverlayWindow.focus()
+    return
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow()
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
 
 // Prevent rapid double-clicks/relaunches from creating multiple independent
 // Electron main processes (and, in dev-server mode, multiple Vite servers).
@@ -81,7 +103,10 @@ if (!hasSingleInstanceLock) {
       : prowlarrSetupWindow && !prowlarrSetupWindow.isDestroyed()
         ? prowlarrSetupWindow
         : mainWindow
-    if (!target || target.isDestroyed()) return
+    if (!target || target.isDestroyed()) {
+      foregroundNetWatch()
+      return
+    }
     if (typeof target.isMinimized === 'function' && target.isMinimized()) target.restore()
     target.show()
     target.focus()
@@ -202,7 +227,111 @@ function createWindow() {
   hardenRendererNavigation(mainWindow.webContents, expectedUrl)
   mainWindow.loadURL(expectedUrl)
 
+  mainWindow.on('close', event => {
+    if (!shouldMinimizeOnClose({
+      onClose: appSettings.get().onClose,
+      trayReady: Boolean(tray && !tray.isDestroyed()),
+      quitting: quittingApp || quitCleanupComplete,
+    })) return
+    event.preventDefault()
+    mainWindow.hide()
+  })
+  mainWindow.on('closed', () => { mainWindow = null })
+
   if (isDev && process.env.NETWATCH_DEVTOOLS === '1') mainWindow.webContents.openDevTools({ mode: 'detach' })
+}
+
+function trayIconPath() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'tray', 'netwatch.ico')
+    : path.resolve(__dirname, '../build/netwatch.ico')
+}
+
+function createTray() {
+  if (process.platform !== 'win32' || (tray && !tray.isDestroyed())) return
+  try {
+    tray = new Tray(trayIconPath())
+    tray.setToolTip('NetWatch')
+    tray.setContextMenu(Menu.buildFromTemplate([{
+      label: 'Exit NetWatch',
+      click: () => app.quit(),
+    }]))
+    tray.on('click', foregroundNetWatch)
+  } catch (error) {
+    tray = null
+    console.error('[Tray] Could not create the NetWatch tray icon:', error)
+  }
+}
+
+function sendKeepWatchingChanged(items = keepWatching.list()) {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.webContents.send('keep-watching:changed', {
+    enabled: appSettings.get().keepWatchingEnabled,
+    limit: appSettings.get().keepWatchingLimit,
+    items,
+  })
+}
+
+function keepWatchingState() {
+  const settings = appSettings.get()
+  return {
+    enabled: settings.keepWatchingEnabled,
+    limit: settings.keepWatchingLimit,
+    items: keepWatching.list(),
+  }
+}
+
+function checkpointDesktopPlayback(state = mpv.getState(), { force = false } = {}) {
+  if (!playerSession?.mediaItem || playerSession.resumePending || !appSettings.get().keepWatchingEnabled) return false
+  const now = Date.now()
+  if (!force && now - lastKeepWatchingCheckpointAt < 15_000) return false
+  const status = String(state?.status || '')
+  if (!force && status !== 'playing' && status !== 'paused') return false
+  try {
+    const changed = keepWatching.checkpoint(playerSession.mediaItem, state?.position, state?.duration)
+    if (changed) lastKeepWatchingCheckpointAt = now
+    return changed
+  } catch (error) {
+    lastKeepWatchingCheckpointAt = now
+    console.error('[KeepWatching] Could not save desktop playback progress:', error)
+    return false
+  }
+}
+
+async function applyDesktopResumePosition() {
+  if (!playerSession?.resumePending) return
+  const session = playerSession
+  const requested = Number(session.resumePositionSeconds)
+  if (!Number.isFinite(requested) || requested <= 0) {
+    session.resumePending = false
+    return
+  }
+  const duration = Number(mpv.getState()?.duration)
+  const target = Number.isFinite(duration) && duration > 0
+    ? Math.max(0, Math.min(requested, Math.max(0, duration - 1)))
+    : Math.max(0, requested)
+  try {
+    await mpv.execute({ type: 'seekAbsolute', seconds: target })
+  } catch (error) {
+    console.warn('[KeepWatching] Could not restore the saved playback position:', error?.message || error)
+  } finally {
+    session.resumePending = false
+    lastKeepWatchingCheckpointAt = Date.now()
+  }
+}
+
+function checkpointRemotePlayback(payload) {
+  const catalogId = String(payload?.catalogId || '')
+  const match = /^(movie|tv):([1-9]\d{0,11})$/u.exec(catalogId)
+  if (!match) return false
+  return keepWatching.checkpoint({
+    id: Number(match[2]),
+    tmdb_id: Number(match[2]),
+    type: match[1],
+    title: payload?.title,
+    season: payload?.season,
+    episode: payload?.episode,
+  }, payload?.positionSeconds, payload?.durationSeconds)
 }
 
 function createStartupErrorWindow(error) {
@@ -550,8 +679,14 @@ function composeFilePath() {
   return app.isPackaged ? 'docker/docker-compose.packaged.yml' : 'docker/docker-compose.yml'
 }
 
+function composeCommandArgsFor(settings, ...args) {
+  const compose = ['docker', 'compose', '-f', composeFilePath()]
+  if (settings.flareSolverrEnabled) compose.push('--profile', 'flaresolverr')
+  return ['env', ...composeRuntimeEnvironment(settings), ...compose, ...args]
+}
+
 function composeCommandArgs(...args) {
-  return ['docker', 'compose', '-f', composeFilePath(), ...args]
+  return composeCommandArgsFor(appSettings.get(), ...args)
 }
 
 async function runWsl(args, timeoutMs = 30_000) {
@@ -793,7 +928,9 @@ async function recreateVpnNamespace(reason) {
   // so repair the complete privacy namespace as one unit, including FlareSolverr.
   const repairArgs = ['up', '-d', '--force-recreate']
   if (app.isPackaged && packagedRuntimeUpdated) repairArgs.push('--build')
-  repairArgs.push('vpn', 'torrent-engine', 'prowlarr', 'flaresolverr', 'backend')
+  repairArgs.push('vpn', 'torrent-engine', 'prowlarr')
+  if (appSettings.get().flareSolverrEnabled) repairArgs.push('flaresolverr')
+  repairArgs.push('backend')
   const repairTimeoutMs = app.isPackaged && packagedRuntimeUpdated ? 600_000 : 180_000
   await runWsl(composeCommandArgs(...repairArgs), repairTimeoutMs)
 
@@ -1447,7 +1584,9 @@ async function startNormalDesktop() {
   })
   await ensureRendererBuild()
   if (!mainWindow || mainWindow.isDestroyed()) createWindow()
+  createTray()
   sendRuntimeStatus()
+  sendKeepWatchingChanged()
   void runtimePromise
 }
 
@@ -1574,9 +1713,6 @@ async function ensureVite() {
 async function ensureRendererBuild() {
   if (app.isPackaged || !isDev) return
 
-  // Existing player smoke tests deliberately keep their externally-owned Vite
-  // server. The normal GUI does not: it builds the renderer once, then loads
-  // dist/index.html and dist/player.html directly via file:// URLs.
   if (useViteDevServer) {
     await ensureVite()
     return
@@ -1692,6 +1828,14 @@ async function ensureInfrastructure() {
 
   if (!dockerReady) {
     throw new Error('Docker is unavailable. Start Docker Desktop, then retry NetWatch startup.')
+  }
+
+  // Before FlareSolverr became optional, upgrades always had this container.
+  // Preserve that behavior only when an existing installation is detected;
+  // genuinely new installations keep the new default of Off.
+  if (!appSettings.wasPersisted('flareSolverrEnabled')) {
+    const existingFlareSolverr = await containerHealth('nw_flaresolverr')
+    appSettings.update({ flareSolverrEnabled: existingFlareSolverr !== 'missing' })
   }
 
   setRuntimeStatus({
@@ -2220,6 +2364,7 @@ async function monitorTorrentPreparation(infoHash, source, generation) {
         if (!playerVideoWindow || playerVideoWindow.isDestroyed()) return
         try {
           await mpv.start(playerVideoWindow, source)
+          await applyDesktopResumePosition()
         } catch (error) {
           if (!preparationIsCurrent(generation, infoHash)) return
           console.error('[Player mpv startup]', error)
@@ -2355,6 +2500,7 @@ async function openPreparingPlayerSession(payload) {
   await mpv.stop({ graceful: false })
 
   const generation = ++playerPreparationGeneration
+  lastKeepWatchingCheckpointAt = 0
   const directSource = typeof payload.torrentSource === 'string' ? payload.torrentSource : ''
   const expectedHash = payload.infoHash || payload.expectedHash || (directSource ? extractBtih(directSource) : null) || null
 
@@ -2364,6 +2510,10 @@ async function openPreparingPlayerSession(payload) {
     infoHash: expectedHash,
     filePath: payload.filePath || null,
     mediaItem: payload.mediaItem || null,
+    resumePositionSeconds: Number.isFinite(Number(payload.resumePositionSeconds))
+      ? Math.max(0, Math.min(7 * 24 * 60 * 60, Number(payload.resumePositionSeconds)))
+      : 0,
+    resumePending: Number(payload.resumePositionSeconds) > 0,
     openedAt: new Date().toISOString(),
   }
 
@@ -2420,6 +2570,7 @@ async function openPlayerSession(payload) {
   if (playerSession) throw new Error('A player session is already open')
 
   await createPlayerWindows()
+  lastKeepWatchingCheckpointAt = 0
   ++playerPreparationGeneration
   playerPreparation = defaultPlayerPreparation()
   setPlayerPreparation({ stage: 'ready', ready: true, message: 'Playing' })
@@ -2430,6 +2581,10 @@ async function openPlayerSession(payload) {
     infoHash: payload.infoHash || null,
     filePath: payload.filePath || null,
     mediaItem: payload.mediaItem || null,
+    resumePositionSeconds: Number.isFinite(Number(payload.resumePositionSeconds))
+      ? Math.max(0, Math.min(7 * 24 * 60 * 60, Number(payload.resumePositionSeconds)))
+      : 0,
+    resumePending: Number(payload.resumePositionSeconds) > 0,
     openedAt: new Date().toISOString(),
   }
 
@@ -2442,6 +2597,7 @@ async function openPlayerSession(payload) {
     showPlayerVideoWindowFromLaunchState()
     await new Promise(resolve => setTimeout(resolve, 100))
     await mpv.start(playerVideoWindow, payload.source)
+    await applyDesktopResumePosition()
 
     if (playerOverlayWindow && !playerOverlayWindow.isDestroyed()) {
       syncPlayerOverlayBounds()
@@ -2569,6 +2725,7 @@ async function closePlayerSession() {
   const closingSession = playerSession
 
   try {
+    checkpointDesktopPlayback(mpv.getState(), { force: true })
     if (playerSurfaceSyncTimer) {
       clearTimeout(playerSurfaceSyncTimer)
       playerSurfaceSyncTimer = null
@@ -2648,7 +2805,10 @@ async function setPlayerFullscreen(enabled) {
   return fullscreen
 }
 
-mpv.on('state', state => sendToPlayerRenderer('player:state', state))
+mpv.on('state', state => {
+  sendToPlayerRenderer('player:state', state)
+  checkpointDesktopPlayback(state)
+})
 mpv.on('log', entry => sendToPlayerRenderer('player:log', entry))
 
 app.whenReady().then(async () => {
@@ -2662,50 +2822,16 @@ app.whenReady().then(async () => {
     onStatus: status => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('remote:status', status)
     },
+    keepWatching: {
+      getState: () => keepWatchingState(),
+      get: catalogId => {
+        const record = keepWatching.get(catalogId)
+        return record ? { ...record, defaultQuality: appSettings.get().defaultQuality } : null
+      },
+      checkpoint: payload => checkpointRemotePlayback(payload),
+    },
   })
   await remoteGateway.initialize()
-  // Player-core smoke mode remains independent of the main GUI/orchestrator.
-  // Existing smoke scripts can keep owning Vite/Docker exactly as before.
-  // The torrent-source variant exercises the exact production lifecycle: open
-  // the player shell first, then let Electron add/monitor/clean the torrent.
-  if (isDev && process.env.NETWATCH_PLAYER_TEST_TORRENT_SOURCE) {
-    try {
-      await openTorrentSession({
-        torrentSource: process.env.NETWATCH_PLAYER_TEST_TORRENT_SOURCE,
-        expectedHash: process.env.NETWATCH_PLAYER_TEST_EXPECTED_HASH || null,
-        title: process.env.NETWATCH_PLAYER_TEST_TITLE || 'NetWatch torrent player test',
-        mediaName: process.env.NETWATCH_PLAYER_TEST_TITLE || 'NetWatch torrent player test',
-      }, { allowDirectSource: true })
-    } catch (error) {
-      console.error('[Player torrent test]', error)
-      app.quit()
-    }
-    return
-  }
-
-  // Existing-stream smoke mode is retained for low-level player regression tests.
-  if (isDev && process.env.NETWATCH_PLAYER_TEST_SOURCE) {
-    try {
-      const infoHash = process.env.NETWATCH_PLAYER_TEST_INFO_HASH || null
-      if (infoHash) {
-        await openExistingTorrentSession({
-          source: process.env.NETWATCH_PLAYER_TEST_SOURCE,
-          title: process.env.NETWATCH_PLAYER_TEST_TITLE || 'NetWatch torrent player test',
-          infoHash,
-        })
-      } else {
-        await openPlayerSession({
-          source: process.env.NETWATCH_PLAYER_TEST_SOURCE,
-          title: process.env.NETWATCH_PLAYER_TEST_TITLE || 'NetWatch native player test',
-        })
-      }
-    } catch (error) {
-      console.error('[Player test]', error)
-      app.quit()
-    }
-    return
-  }
-
   try {
     // A packaged build first installs/synchronizes its clean runtime template
     // into the user's WSL data directory. Private config and Prowlarr state live
@@ -2733,6 +2859,9 @@ app.whenReady().then(async () => {
 })
 
 app.on('before-quit', event => {
+  quittingApp = true
+  if (tray && !tray.isDestroyed()) tray.destroy()
+  tray = null
   if (quitCleanupComplete) {
     closingPlayer = true
     void mpv.stop({ graceful: false })
@@ -2764,6 +2893,9 @@ app.on('before-quit', event => {
 })
 
 app.on('window-all-closed', () => {
+  if (!quittingApp && process.platform === 'win32' && tray && !tray.isDestroyed() && appSettings.get().onClose === 'minimize-to-tray') {
+    return
+  }
   if (backendProcess) backendProcess.kill()
   void remoteGateway?.stopChild()
   stopOwnedVite()
@@ -2775,6 +2907,110 @@ app.on('window-all-closed', () => {
 ipcMain.on('window:minimize', event => { assertMainRendererSender(event); mainWindow?.minimize() })
 ipcMain.on('window:maximize', event => { assertMainRendererSender(event); if (mainWindow) (mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize()) })
 ipcMain.on('window:close', event => { assertMainRendererSender(event); mainWindow?.close() })
+
+ipcMain.handle('settings:get', event => {
+  assertMainRendererSender(event)
+  return appSettings.get()
+})
+ipcMain.handle('settings:update', async (event, patch) => {
+  assertMainRendererSender(event)
+  const previous = appSettings.get()
+  const applyToRuntime = Boolean(runtimeStatus.ready)
+  if (patch?.keepWatchingEnabled === false && previous.keepWatchingEnabled) {
+    const result = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      buttons: ['Cancel', 'Disable and delete'],
+      defaultId: 0,
+      cancelId: 0,
+      title: 'Disable Keep Watching?',
+      message: 'Disabling Keep Watching permanently deletes the current viewing history.',
+    })
+    if (result.response !== 1) return { cancelled: true, settings: previous }
+  }
+  if (patch?.resourceProfile && patch.resourceProfile !== previous.resourceProfile && applyToRuntime) {
+    const result = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      buttons: ['Cancel', 'Apply and restart services'],
+      defaultId: 0,
+      cancelId: 0,
+      title: 'Change resource usage?',
+      message: 'Changing resource usage restarts the streaming services.',
+      detail: 'Any active Android stream will stop. Start playback again after NetWatch returns to Ready.',
+    })
+    if (result.response !== 1) return { cancelled: true, settings: previous }
+  }
+  const next = appSettings.update(patch)
+  try {
+    if (previous.keepWatchingEnabled && !next.keepWatchingEnabled) keepWatching.disable()
+    else if (!previous.keepWatchingEnabled && next.keepWatchingEnabled) keepWatching.enable()
+    if (previous.keepWatchingLimit !== next.keepWatchingLimit) keepWatching.applyLimit()
+
+    if (previous.flareSolverrEnabled !== next.flareSolverrEnabled && applyToRuntime) {
+      if (next.flareSolverrEnabled) {
+        await runWsl(composeCommandArgs('up', '-d', 'flaresolverr'), app.isPackaged ? 600_000 : 180_000)
+        const flareReady = await waitForContainerHealthy('nw_flaresolverr', 90_000)
+        if (!flareReady.healthy) throw new Error('FlareSolverr did not become ready.')
+      } else {
+        await runWsl(composeCommandArgsFor(previous, 'stop', 'flaresolverr'), 60_000).catch(() => {})
+        await runWsl(composeCommandArgsFor(previous, 'rm', '-f', 'flaresolverr'), 60_000).catch(() => {})
+      }
+      await verifyVpnIsolation()
+    }
+
+    if (previous.resourceProfile !== next.resourceProfile && applyToRuntime) {
+      setRuntimeStatus({ ready: false, phase: 'services', message: 'Applying resource usage…' })
+      await runWsl(composeCommandArgs('up', '-d', '--force-recreate', 'torrent-engine', 'backend'), 240_000)
+      const ready = await waitForHttp(`${BACKEND_BASE_URL}/api/health`, 90_000, 500)
+      if (!ready) throw new Error('NetWatch services did not become ready after applying resource usage.')
+      await verifyVpnIsolation()
+      setRuntimeStatus({
+        phase: 'ready', ready: true, message: 'Ready', error: null,
+        services: { docker: 'ready', stack: 'ready', backend: 'ready', torrentEngine: 'ready', prowlarr: 'ready' },
+      })
+    }
+    return { cancelled: false, settings: next }
+  } catch (error) {
+    appSettings.update({
+      flareSolverrEnabled: previous.flareSolverrEnabled,
+      resourceProfile: previous.resourceProfile,
+    })
+    try {
+      if (previous.flareSolverrEnabled !== next.flareSolverrEnabled && applyToRuntime) {
+        if (previous.flareSolverrEnabled) {
+          await runWsl(composeCommandArgsFor(previous, 'up', '-d', 'flaresolverr'), app.isPackaged ? 600_000 : 180_000)
+          const flareRestored = await waitForContainerHealthy('nw_flaresolverr', 90_000)
+          if (!flareRestored.healthy) throw new Error('Previous FlareSolverr configuration did not recover.')
+        } else {
+          await runWsl(composeCommandArgsFor(next, 'stop', 'flaresolverr'), 60_000).catch(() => {})
+          await runWsl(composeCommandArgsFor(next, 'rm', '-f', 'flaresolverr'), 60_000).catch(() => {})
+        }
+        await verifyVpnIsolation()
+      }
+      if (previous.resourceProfile !== next.resourceProfile && applyToRuntime) {
+        await runWsl(composeCommandArgsFor(previous, 'up', '-d', '--force-recreate', 'torrent-engine', 'backend'), 240_000)
+        const restored = await waitForHttp(`${BACKEND_BASE_URL}/api/health`, 90_000, 500)
+        if (!restored) throw new Error('Previous resource profile did not recover.')
+        await verifyVpnIsolation()
+        setRuntimeStatus({
+          phase: 'ready', ready: true, message: 'Ready', error: null,
+          services: { docker: 'ready', stack: 'ready', backend: 'ready', torrentEngine: 'ready', prowlarr: 'ready' },
+        })
+      }
+    } catch (rollbackError) {
+      setRuntimeStatus({
+        phase: 'error', ready: false,
+        message: 'NetWatch could not restore the previous service configuration.',
+        error: rollbackError?.message || String(rollbackError),
+      })
+    }
+    throw error
+  }
+})
+
+ipcMain.handle('keep-watching:get-state', event => {
+  assertMainRendererSender(event)
+  return keepWatchingState()
+})
 
 
 ipcMain.handle('runtime:get-status', event => { assertMainRendererSender(event); return { ...runtimeStatus, services: { ...runtimeStatus.services } } })

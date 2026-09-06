@@ -9,6 +9,7 @@ import {
 } from 'iconoir-react'
 import { CatalogCard } from './components/CatalogCard'
 import { HomeRail } from './components/HomeRail'
+import { KeepWatchingRail, type HydratedKeepWatchingItem } from './components/KeepWatchingRail'
 import { DiscoverView } from './components/DiscoverView'
 import { SearchBar } from './components/SearchBar'
 import { MovieDetailsView } from './components/MovieDetailsView'
@@ -26,6 +27,7 @@ import {
   type DiscoverCategory,
   type DiscoverMedia,
   type MovieStreamOptions,
+  type EpisodeStreamOptions,
   type TmdbCatalogSummary,
   type TmdbEpisode,
   type TmdbHomePayload,
@@ -34,6 +36,7 @@ import {
   type TmdbMovieSummary,
   type TmdbSeriesDetails,
   type TmdbSeriesSummary,
+  type TmdbSeasonDetails,
 } from './types/metadata'
 import {
   type QualityFilter,
@@ -42,6 +45,7 @@ import {
   type TorrentSearchResult,
   assertReleaseReferences,
   resultSource,
+  selectAutomaticResult,
 } from './types/torrents'
 
 const INITIAL_RUNTIME: NetWatchRuntimeStatus = {
@@ -164,6 +168,50 @@ async function fetchMovieStreamOptions(tmdbId: number): Promise<MovieStreamOptio
   }
 }
 
+async function fetchMovieDetails(tmdbId: number): Promise<TmdbMovieDetails> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 20_000)
+  try {
+    const response = await fetch(`${BACKEND_BASE_URL}/api/metadata/movies/${encodeURIComponent(String(tmdbId))}`, { signal: controller.signal })
+    return await readJsonResponse(response) as TmdbMovieDetails
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+async function fetchSeriesSeason(tmdbId: number, season: number): Promise<TmdbSeasonDetails> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 20_000)
+  try {
+    const response = await fetch(`${BACKEND_BASE_URL}/api/metadata/series/${encodeURIComponent(String(tmdbId))}/seasons/${season}`, { signal: controller.signal })
+    return await readJsonResponse(response) as TmdbSeasonDetails
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+async function fetchEpisodeStreamOptions(
+  tmdbId: number,
+  season: number,
+  episode: number,
+  anime: boolean,
+): Promise<EpisodeStreamOptions> {
+  const params = new URLSearchParams({ min_seeders: '1', anime: anime ? 'true' : 'false' })
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 35_000)
+  try {
+    const response = await fetch(
+      `${BACKEND_BASE_URL}/api/metadata/series/${encodeURIComponent(String(tmdbId))}/episodes/${season}/${episode}/stream-options?${params}`,
+      { signal: controller.signal },
+    )
+    const payload = await readJsonResponse(response) as EpisodeStreamOptions
+    assertReleaseReferences(payload.results)
+    return payload
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
 async function fetchSeriesDetails(tmdbId: number): Promise<TmdbSeriesDetails> {
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort(), 20_000)
@@ -202,6 +250,9 @@ export default function App() {
   const [homeLoading, setHomeLoading] = useState(false)
   const [homeLoaded, setHomeLoaded] = useState(false)
   const [homeError, setHomeError] = useState<string | null>(null)
+  const [keepWatchingItems, setKeepWatchingItems] = useState<HydratedKeepWatchingItem[]>([])
+  const [keepWatchingOpening, setKeepWatchingOpening] = useState<string | null>(null)
+  const [keepWatchingError, setKeepWatchingError] = useState<string | null>(null)
 
   const [selectedMovie, setSelectedMovie] = useState<TmdbMovieSummary | null>(null)
   const [movieData, setMovieData] = useState<MovieStreamOptions | null>(null)
@@ -226,6 +277,34 @@ export default function App() {
   const discoverSearchRef = useRef<HTMLInputElement>(null)
   const detailRequestId = useRef(0)
   const discoverRequestId = useRef(0)
+  const keepWatchingRequestId = useRef(0)
+  const keepWatchingMetadata = useRef(new Map<string, TmdbCatalogSummary>())
+
+  const applyMainSettings = useCallback((settings: NetWatchAppSettings) => {
+    setPreferences(current => {
+      const next = {
+        ...current,
+        defaultQuality: settings.defaultQuality,
+        onClose: settings.onClose,
+        keepWatchingEnabled: settings.keepWatchingEnabled,
+        keepWatchingLimit: settings.keepWatchingLimit,
+        flareSolverrEnabled: settings.flareSolverrEnabled,
+        resourceProfile: settings.resourceProfile,
+      }
+      saveUiPreferences(next)
+      return next
+    })
+    setQualityFilter(settings.defaultQuality)
+  }, [])
+
+  useEffect(() => {
+    const api = window.electron?.settings
+    if (!api) return
+    const local = loadUiPreferences()
+    void api.update({ defaultQuality: local.defaultQuality })
+      .then(result => { if (!result.cancelled) applyMainSettings(result.settings) })
+      .catch(() => {})
+  }, [applyMainSettings])
 
   useEffect(() => {
     const bridge = window.electron?.runtime
@@ -268,6 +347,45 @@ export default function App() {
       setHomeLoading(false)
     }
   }, [runtime.ready, homeLoading])
+
+  const hydrateKeepWatching = useCallback(async (state: NetWatchKeepWatchingState) => {
+    const requestId = ++keepWatchingRequestId.current
+    if (!state.enabled || !state.items.length) {
+      if (!state.enabled) keepWatchingMetadata.current.clear()
+      setKeepWatchingItems([])
+      return
+    }
+    const hydrated = await Promise.all(state.items.map(async record => {
+      try {
+        const cached = keepWatchingMetadata.current.get(record.catalog_id)
+        if (cached) return { record, item: cached } as HydratedKeepWatchingItem
+        const id = Number(record.catalog_id.split(':')[1])
+        const item = record.catalog_id.startsWith('movie:')
+          ? await fetchMovieDetails(id)
+          : await fetchSeriesDetails(id)
+        keepWatchingMetadata.current.set(record.catalog_id, item)
+        return { record, item } as HydratedKeepWatchingItem
+      } catch {
+        return null
+      }
+    }))
+    if (requestId === keepWatchingRequestId.current) {
+      setKeepWatchingItems(hydrated.filter((entry): entry is HydratedKeepWatchingItem => Boolean(entry)))
+    }
+  }, [])
+
+  useEffect(() => {
+    const api = window.electron?.keepWatching
+    if (!api || !runtime.ready) return
+    let active = true
+    void api.getState().then(state => { if (active) void hydrateKeepWatching(state) }).catch(() => {})
+    const off = api.onChanged(state => { if (active) void hydrateKeepWatching(state) })
+    return () => {
+      active = false
+      ++keepWatchingRequestId.current
+      off()
+    }
+  }, [hydrateKeepWatching, runtime.ready])
 
   useEffect(() => {
     if (runtime.ready && view === 'home' && !homeLoaded && !homeLoading && !homeError) {
@@ -534,6 +652,54 @@ export default function App() {
     }
   }
 
+  const resumeKeepWatching = async (entry: HydratedKeepWatchingItem) => {
+    const bridge = window.electron?.player
+    const record = entry.record
+    if (!bridge?.openTorrent || keepWatchingOpening) return
+    setKeepWatchingOpening(record.catalog_id)
+    setKeepWatchingError(null)
+    try {
+      if (record.catalog_id.startsWith('movie:')) {
+        const data = await fetchMovieStreamOptions(entry.item.id)
+        const selected = selectAutomaticResult(data.results, preferences.defaultQuality)
+        if (!selected) throw new Error('No matching streams')
+        await bridge.openTorrent({
+          releaseRef: resultSource(selected),
+          title: data.movie.title,
+          mediaName: data.movie.title,
+          expectedHash: selected.info_hash || null,
+          mediaItem: toMediaItem(data.movie),
+          resumePositionSeconds: record.position_seconds,
+        })
+        return
+      }
+
+      if (!Number.isInteger(record.season) || !Number.isInteger(record.episode)) {
+        throw new Error('Saved episode is unavailable')
+      }
+      const series = await fetchSeriesDetails(entry.item.id)
+      const season = await fetchSeriesSeason(entry.item.id, record.season!)
+      const episode = season.episodes.find(item => item.episode_number === record.episode)
+      if (!episode) throw new Error('Saved episode is unavailable')
+      const data = await fetchEpisodeStreamOptions(series.id, record.season!, record.episode!, Boolean(series.is_anime))
+      const selected = selectAutomaticResult(data.results, preferences.defaultQuality)
+      if (!selected) throw new Error('No matching streams')
+      const code = `S${String(record.season).padStart(2, '0')}E${String(record.episode).padStart(2, '0')}`
+      await bridge.openTorrent({
+        releaseRef: resultSource(selected),
+        title: `${series.title} · ${code}${episode.name ? ` · ${episode.name}` : ''}`,
+        mediaName: `${series.title} ${code}`,
+        expectedHash: selected.info_hash || null,
+        mediaItem: toSeriesMediaItem(series, episode),
+        resumePositionSeconds: record.position_seconds,
+      })
+    } catch (error) {
+      setKeepWatchingError(getErrorMessage(error))
+    } finally {
+      setKeepWatchingOpening(null)
+    }
+  }
+
   const retryStartup = async () => {
     if (!window.electron?.runtime) return
     setRuntime({ ...INITIAL_RUNTIME, message: 'Retrying startup…' })
@@ -550,10 +716,36 @@ export default function App() {
     setDiagnosticsOpen(false)
   }
 
-  const updatePreferences = (next: NetWatchUiPreferences) => {
-    setPreferences(next)
-    saveUiPreferences(next)
-    setQualityFilter(next.defaultQuality)
+  const updatePreferences = (patch: Partial<NetWatchUiPreferences>) => {
+    const next = { ...preferences, ...patch }
+    const api = window.electron?.settings
+    if (!api) {
+      setPreferences(next)
+      saveUiPreferences(next)
+      setQualityFilter(next.defaultQuality)
+      return
+    }
+    const localPatch: Partial<NetWatchUiPreferences> = {}
+    if (patch.subtitleLanguage !== undefined) localPatch.subtitleLanguage = patch.subtitleLanguage
+    if (patch.showStartupDetails !== undefined) localPatch.showStartupDetails = patch.showStartupDetails
+    if (Object.keys(localPatch).length) {
+      setPreferences(current => {
+        const localNext = { ...current, ...localPatch }
+        saveUiPreferences(localNext)
+        return localNext
+      })
+    }
+    const mainPatch: Partial<Omit<NetWatchAppSettings, 'version'>> = {}
+    if (patch.defaultQuality !== undefined) mainPatch.defaultQuality = patch.defaultQuality
+    if (patch.onClose !== undefined) mainPatch.onClose = patch.onClose
+    if (patch.keepWatchingEnabled !== undefined) mainPatch.keepWatchingEnabled = patch.keepWatchingEnabled
+    if (patch.keepWatchingLimit !== undefined) mainPatch.keepWatchingLimit = patch.keepWatchingLimit
+    if (patch.flareSolverrEnabled !== undefined) mainPatch.flareSolverrEnabled = patch.flareSolverrEnabled
+    if (patch.resourceProfile !== undefined) mainPatch.resourceProfile = patch.resourceProfile
+    if (!Object.keys(mainPatch).length) return
+    void api.update(mainPatch).then(result => {
+      if (!result.cancelled) applyMainSettings(result.settings)
+    }).catch(() => {})
   }
 
   const sidebarView: NetWatchView = view === 'search'
@@ -611,7 +803,21 @@ export default function App() {
                   </div>
                 )}
 
+                {keepWatchingError && runtime.ready && (
+                  <div className="nw-inline-notice is-error nw-home-notice compact">
+                    <WarningTriangle width={18} height={18} />
+                    <div><strong>Keep Watching unavailable</strong><p>{keepWatchingError}</p></div>
+                  </div>
+                )}
+
                 <div className="nw-home-feed">
+                  {preferences.keepWatchingEnabled && keepWatchingItems.length > 0 ? (
+                    <KeepWatchingRail
+                      items={keepWatchingItems}
+                      openingCatalogId={keepWatchingOpening}
+                      onSelect={entry => void resumeKeepWatching(entry)}
+                    />
+                  ) : null}
                   <HomeRail
                     title="Trending Movies"
                     items={home.movies}

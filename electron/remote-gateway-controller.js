@@ -87,10 +87,11 @@ async function createIdentity() {
 }
 
 class RemoteGatewayController {
-  constructor({ getRuntimeReady, isTorrentInDesktopUse, onStatus }) {
+  constructor({ getRuntimeReady, isTorrentInDesktopUse, onStatus, keepWatching = null }) {
     this.getRuntimeReady = getRuntimeReady
     this.isTorrentInDesktopUse = isTorrentInDesktopUse
     this.onStatus = onStatus
+    this.keepWatching = keepWatching
     this.directory = path.join(app.getPath('userData'), 'remote-gateway')
     this.settingsPath = path.join(this.directory, 'settings.json')
     this.identityPath = path.join(this.directory, 'identity.json')
@@ -215,7 +216,7 @@ class RemoteGatewayController {
       stdio: 'pipe',
     })
     this.child = child
-    child.on('message', message => this.onChildMessage(message))
+    child.on('message', message => this.onChildMessage(message, child))
     child.on('exit', code => {
       if (this.child !== child) return
       this.child = null
@@ -251,7 +252,7 @@ class RemoteGatewayController {
     }
   }
 
-  onChildMessage(message) {
+  onChildMessage(message, sourceChild = this.child) {
     if (message?.type === 'response') {
       const pending = this.pending.get(message.id)
       if (!pending) return
@@ -263,12 +264,42 @@ class RemoteGatewayController {
     }
     if (message?.type === 'cleanup-query') {
       const allowed = !this.isTorrentInDesktopUse?.(message.infoHash)
-      this.child?.postMessage({ type: 'cleanup-response', id: message.id, allowed })
+      if (this.child === sourceChild) sourceChild?.postMessage({ type: 'cleanup-response', id: message.id, allowed })
+      return
+    }
+    if (message?.type === 'host-request') {
+      void this.handleHostRequest(message, sourceChild)
       return
     }
     if (message?.type === 'event' && message.event?.type === 'status') {
       this.lastStatus = { ...message.event.status, error: null }
       this.emitStatus()
+    }
+  }
+
+  async handleHostRequest(message, sourceChild) {
+    const respond = response => {
+      if (this.child === sourceChild) sourceChild?.postMessage({ type: 'host-response', id: message.id, ...response })
+    }
+    try {
+      if (!this.keepWatching || typeof message.id !== 'string') throw new Error('Keep Watching is unavailable')
+      let result
+      switch (message.action) {
+        case 'keep-watching-state':
+          result = this.keepWatching.getState()
+          break
+        case 'keep-watching-get':
+          result = this.keepWatching.get(String(message.payload?.catalogId || ''))
+          break
+        case 'keep-watching-checkpoint':
+          result = { changed: Boolean(this.keepWatching.checkpoint(message.payload)) }
+          break
+        default:
+          throw new Error('Unsupported host request')
+      }
+      respond({ result })
+    } catch (error) {
+      respond({ error: error instanceof Error ? error.message : 'Host request failed' })
     }
   }
 

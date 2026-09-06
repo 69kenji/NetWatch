@@ -35,10 +35,10 @@ Then build the NSIS installer:
 npm run package:win
 ```
 
-For 1.0.9:
+For 1.1.0:
 
 ```text
-release\NetWatch-Setup-1.0.9.exe
+release\NetWatch-Setup-1.1.0.exe
 ```
 
 ## Installer behavior
@@ -59,7 +59,7 @@ Docker Desktop is downloaded only from `desktop.docker.com`. The download is bou
 
 The helper writes a heartbeat while long actions run so NSIS can detect an interrupted setup. Ubuntu is considered ready only after a normal non-root user exists and can run commands.
 
-NetWatch 1.0 supports x64 Windows only. Protected machine-wide locations such as `C:\Program Files` are not supported by the current-user installer.
+NetWatch supports x64 Windows only. Protected machine-wide locations such as `C:\Program Files` are not supported by the current-user installer.
 
 ## Persistent state
 

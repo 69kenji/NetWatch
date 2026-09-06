@@ -51,10 +51,22 @@ class MetadataService:
     HOME_CACHE_SCHEMA_VERSION = 1
     HOME_CACHE_FILENAME = "home-v1.json"
     CATALOG_ENRICHMENT_TTL_SECS = 21_600.0
+    CATALOG_ENRICHMENT_CACHE_MAX_ENTRIES = 512
     GENRE_CACHE_TTL_SECS = 86_400.0
     RECENT_WINDOW_DAYS = 120
     _catalog_enrichment_cache: dict[tuple[str, int], tuple[float, dict]] = {}
     _genre_cache: dict[str, tuple[float, list[dict]]] = {}
+
+    @classmethod
+    def _prune_catalog_enrichment_cache(cls, now: float) -> None:
+        cls._catalog_enrichment_cache = {
+            key: value for key, value in cls._catalog_enrichment_cache.items()
+            if value[0] > now
+        }
+        overflow = len(cls._catalog_enrichment_cache) - cls.CATALOG_ENRICHMENT_CACHE_MAX_ENTRIES
+        if overflow > 0:
+            for key in list(cls._catalog_enrichment_cache)[:overflow]:
+                cls._catalog_enrichment_cache.pop(key, None)
 
     @classmethod
     def _cache_dir(cls) -> Optional[Path]:
@@ -348,6 +360,7 @@ class MetadataService:
     async def _catalog_enrichment(cls, media_type: str, tmdb_id: int) -> dict:
         key = (media_type, int(tmdb_id))
         now = time.monotonic()
+        cls._prune_catalog_enrichment_cache(now)
         cached = cls._catalog_enrichment_cache.get(key)
         if cached and now < cached[0]:
             return dict(cached[1])
@@ -388,6 +401,7 @@ class MetadataService:
             now + cls.CATALOG_ENRICHMENT_TTL_SECS,
             dict(enrichment),
         )
+        cls._prune_catalog_enrichment_cache(now)
         return enrichment
 
     @classmethod
@@ -1011,7 +1025,7 @@ class MetadataService:
         data = await cls._get(
             f"/movie/{int(tmdb_id)}",
             {
-                "append_to_response": "credits,external_ids,images",
+                "append_to_response": "credits,external_ids,images,alternative_titles",
                 "include_image_language": "en,null",
                 "language": "en-US",
             },
@@ -1040,7 +1054,7 @@ class MetadataService:
         data = await cls._get(
             f"/tv/{int(tmdb_id)}",
             {
-                "append_to_response": "aggregate_credits,external_ids,images",
+                "append_to_response": "aggregate_credits,external_ids,images,alternative_titles",
                 "include_image_language": "en,null",
                 "language": "en-US",
             },
@@ -1135,11 +1149,21 @@ class MetadataService:
         release_date = data.get("release_date") or ""
         credits = data.get("credits") or {}
         external_ids = data.get("external_ids") or {}
+        alternative_titles = []
+        for item in (data.get("alternative_titles") or {}).get("titles", []):
+            if not isinstance(item, dict):
+                continue
+            value = str(item.get("title") or "").strip()
+            if value and value not in alternative_titles:
+                alternative_titles.append(value)
+            if len(alternative_titles) >= 12:
+                break
         return {
             "id": int(data["id"]),
             "type": "movie",
             "title": data.get("title") or data.get("original_title") or "Untitled",
             "original_title": data.get("original_title") or data.get("title"),
+            "alternative_titles": alternative_titles,
             "year": release_date[:4],
             "release_date": release_date or None,
             "overview": data.get("overview") or "",
@@ -1180,6 +1204,16 @@ class MetadataService:
             and ((data.get("original_language") or "").lower() == "ja" or "JP" in origin_country)
         )
 
+        alternative_titles = []
+        for item in (data.get("alternative_titles") or {}).get("results", []):
+            if not isinstance(item, dict):
+                continue
+            value = str(item.get("title") or "").strip()
+            if value and value not in alternative_titles:
+                alternative_titles.append(value)
+            if len(alternative_titles) >= 12:
+                break
+
         cast = []
         for member in credits.get("cast", [])[:8]:
             if not isinstance(member, dict):
@@ -1213,6 +1247,7 @@ class MetadataService:
             "type": "tv",
             "title": data.get("name") or data.get("original_name") or "Untitled",
             "original_title": data.get("original_name") or data.get("name"),
+            "alternative_titles": alternative_titles,
             "year": first_air_date[:4],
             "release_date": first_air_date or None,
             "last_air_date": data.get("last_air_date") or None,

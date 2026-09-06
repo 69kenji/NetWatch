@@ -58,6 +58,9 @@ UPLOAD_LIMIT = _env_int("NETWATCH_UPLOAD_LIMIT", 64 * 1024, 0)
 RANGE_LOOKAHEAD_BYTES = _env_int(
     "NETWATCH_RANGE_LOOKAHEAD_BYTES", 32 * 1024 * 1024, 0
 )
+ACTIVE_DOWNLOADS = _env_int("NETWATCH_ACTIVE_DOWNLOADS", 8, 1)
+ACTIVE_LIMIT = _env_int("NETWATCH_ACTIVE_LIMIT", 16, 1)
+CONNECTIONS_LIMIT = _env_int("NETWATCH_CONNECTIONS_LIMIT", 500, 20)
 DEADLINE_STEP_MS = _env_int("NETWATCH_DEADLINE_STEP_MS", 250, 10)
 RANGE_POLL_MS = _env_int("NETWATCH_RANGE_POLL_MS", 100, 25)
 
@@ -145,11 +148,11 @@ class TorrentEngine:
             "anonymous_mode": True,
             "announce_to_all_trackers": True,
             "announce_to_all_tiers": True,
-            "active_downloads": 8,
-            "active_limit": 16,
+            "active_downloads": min(ACTIVE_DOWNLOADS, ACTIVE_LIMIT),
+            "active_limit": ACTIVE_LIMIT,
             "active_dht_limit": -1,
             "active_tracker_limit": -1,
-            "connections_limit": 500,
+            "connections_limit": CONNECTIONS_LIMIT,
             # libtorrent's 'enabled/prefer' encryption policy. It allows plain
             # peers when encryption is unavailable while preferring encryption.
             "out_enc_policy": 1,

@@ -6,6 +6,8 @@ if (!parentPort) throw new Error('Remote gateway must run as an Electron utility
 let gateway = null
 let cleanupSequence = 0
 const cleanupRequests = new Map()
+let hostSequence = 0
+const hostRequests = new Map()
 
 function post(message) {
   parentPort.postMessage(message)
@@ -26,6 +28,18 @@ function requestCleanupApproval(infoHash) {
   })
 }
 
+function requestHost(action, payload = null) {
+  return new Promise((resolve, reject) => {
+    const id = `host-${++hostSequence}`
+    const timer = setTimeout(() => {
+      hostRequests.delete(id)
+      reject(new Error('Desktop history service timed out'))
+    }, 10_000)
+    hostRequests.set(id, { resolve, reject, timer })
+    post({ type: 'host-request', id, action, payload })
+  })
+}
+
 async function action(name, payload) {
   switch (name) {
     case 'start':
@@ -33,6 +47,11 @@ async function action(name, payload) {
       gateway = new RemoteGateway({
         ...payload,
         canCleanupTorrent: requestCleanupApproval,
+        keepWatching: {
+          getState: () => requestHost('keep-watching-state'),
+          get: catalogId => requestHost('keep-watching-get', { catalogId }),
+          checkpoint: payload => requestHost('keep-watching-checkpoint', payload),
+        },
         onEvent: event => post({ type: 'event', event }),
       })
       return gateway.start()
@@ -68,6 +87,15 @@ parentPort.on('message', event => {
     const resolver = cleanupRequests.get(message.id)
     cleanupRequests.delete(message.id)
     resolver?.(message.allowed)
+    return
+  }
+  if (message?.type === 'host-response') {
+    const pending = hostRequests.get(message.id)
+    if (!pending) return
+    hostRequests.delete(message.id)
+    clearTimeout(pending.timer)
+    if (message.error) pending.reject(new Error(message.error))
+    else pending.resolve(message.result)
     return
   }
   if (message?.type !== 'request' || typeof message.id !== 'string') return

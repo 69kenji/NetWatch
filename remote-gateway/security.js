@@ -105,8 +105,12 @@ function assertSafeResponse(value) {
 }
 
 function normalizeDeviceName(value) {
-  const candidate = String(value || '').trim().replace(/[\u0000-\u001f\u007f]/gu, '')
-  if (!candidate || candidate.length > 80) throw new Error('Device name must be 1-80 characters')
+  const candidate = String(value || '')
+    .normalize('NFC')
+    .replace(/[\p{Cc}\p{Cf}]/gu, '')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  if (!candidate || [...candidate].length > 80) throw new Error('Device name must be 1-80 characters')
   return candidate
 }
 

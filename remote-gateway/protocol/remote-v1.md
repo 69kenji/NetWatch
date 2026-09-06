@@ -41,6 +41,8 @@ Authenticated catalog:
 - `GET /remote/v1/title/{movie:id}/stream-options`
 - `GET /remote/v1/title/{tv:id}/episode/{season}/{episode}/stream-options`
 - `GET /remote/v1/artwork/{approved-size}/{filename}`
+- `GET /remote/v1/keep-watching`
+- `POST /remote/v1/keep-watching/{movie:id|tv:id}/playback`
 
 Authenticated playback:
 
@@ -52,12 +54,15 @@ Authenticated playback:
 - `POST /remote/v1/playback/{session_id}/subtitles` with a gateway-issued subtitle reference
 - `GET /remote/v1/playback/{session_id}/subtitles/{subtitle_ref}`
 - `DELETE /remote/v1/playback/{session_id}`
+- `PUT /remote/v1/playback/{session_id}/progress` with bounded position and duration seconds; clients may add a monotonically increasing `update_sequence` to reject stale writes
 
 Authenticated device management:
 
 - `DELETE /remote/v1/device/self`
 
 Embedded audio and subtitle track selection is client-managed by Media3 because Android demuxes and renders the authenticated container stream. The gateway therefore does not expose server-side `select-audio` or `select-subtitle` operations. External subtitle discovery still uses opaque, session-bound references and authenticated content delivery.
+
+Keep Watching history is owned by the desktop main process. The gateway accepts timing only for a device-owned playback session and derives catalog and episode context from that session. History responses contain no release reference, torrent identifier, file path, magnet URI, or cached TMDB metadata. Resume playback resolves fresh metadata and stream options, applies the desktop quality ceiling, and returns an ordinary device-owned playback session.
 
 ## Errors and compatibility
 

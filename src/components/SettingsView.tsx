@@ -4,7 +4,7 @@ import type { NetWatchUiPreferences } from '../utils/preferences'
 
 type Props = {
   preferences: NetWatchUiPreferences
-  onChange: (next: NetWatchUiPreferences) => void
+  onChange: (patch: Partial<NetWatchUiPreferences>) => void
   onOpenDiagnostics: () => void
 }
 
@@ -28,7 +28,7 @@ function vpnBookRemaining(expiresAt: string | null | undefined, nowMs: number) {
 }
 
 export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props) {
-  const update = (patch: Partial<NetWatchUiPreferences>) => onChange({ ...preferences, ...patch })
+  const update = (patch: Partial<NetWatchUiPreferences>) => onChange(patch)
   const [vpnCheck, setVpnCheck] = useState<NetWatchVpnSanityResult | null>(null)
   const [vpnChecking, setVpnChecking] = useState(false)
   const [vpnCheckError, setVpnCheckError] = useState<string | null>(null)
@@ -313,6 +313,80 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
             <option value="720p">720p</option>
           </select>
         </section>
+
+        <section className="nw-settings-card nw-settings-card--compact">
+          <div className="nw-settings-card__copy">
+            <strong>On Close</strong>
+          </div>
+          <select
+            className="nw-settings-select"
+            value={preferences.onClose}
+            onChange={event => update({ onClose: event.target.value as NetWatchUiPreferences['onClose'] })}
+          >
+            <option value="minimize-to-tray">Minimize to tray</option>
+            <option value="exit">Exit</option>
+          </select>
+        </section>
+
+        <section className="nw-settings-card nw-settings-card--compact">
+          <div className="nw-settings-card__copy">
+            <strong>Keep Watching</strong>
+          </div>
+          <select
+            className="nw-settings-select"
+            value={preferences.keepWatchingEnabled ? 'enabled' : 'disabled'}
+            onChange={event => update({ keepWatchingEnabled: event.target.value === 'enabled' })}
+          >
+            <option value="enabled">Enabled</option>
+            <option value="disabled">Disabled</option>
+          </select>
+        </section>
+
+        <section className="nw-settings-card nw-settings-card--compact">
+          <div className="nw-settings-card__copy">
+            <strong>Cached titles</strong>
+          </div>
+          <select
+            className="nw-settings-select"
+            value={preferences.keepWatchingLimit}
+            disabled={!preferences.keepWatchingEnabled}
+            onChange={event => update({ keepWatchingLimit: Number(event.target.value) })}
+          >
+            {Array.from({ length: 20 }, (_, index) => index + 1).map(value => (
+              <option value={value} key={value}>{value}</option>
+            ))}
+          </select>
+        </section>
+
+        <section className="nw-settings-card nw-settings-card--compact">
+          <div className="nw-settings-card__copy">
+            <strong>FlareSolverr</strong>
+            <small>Enable only if a Prowlarr indexer requires Cloudflare solving.</small>
+          </div>
+          <select
+            className="nw-settings-select"
+            value={preferences.flareSolverrEnabled ? 'enabled' : 'disabled'}
+            onChange={event => update({ flareSolverrEnabled: event.target.value === 'enabled' })}
+          >
+            <option value="disabled">Off</option>
+            <option value="enabled">On</option>
+          </select>
+        </section>
+
+        <section className="nw-settings-card nw-settings-card--compact">
+          <div className="nw-settings-card__copy">
+            <strong>Resource usage</strong>
+            <small>Reduced is recommended on systems with limited memory.</small>
+          </div>
+          <select
+            className="nw-settings-select"
+            value={preferences.resourceProfile}
+            onChange={event => update({ resourceProfile: event.target.value as NetWatchUiPreferences['resourceProfile'] })}
+          >
+            <option value="standard">Standard</option>
+            <option value="reduced">Reduced</option>
+          </select>
+        </section>
       </div>
 
       <section className={`nw-settings-runtime nw-settings-runtime--privacy ${vpnEgressVerified ? 'is-safe' : vpnCheckError ? 'is-error' : ''}`}>
@@ -441,7 +515,7 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
                 <div className="nw-remote-devices__heading"><strong>Paired devices (listener disabled)</strong></div>
                 {remoteStatus.paired_devices.filter(item => !item.revoked).map(device => (
                   <div className="nw-remote-device" key={device.id}>
-                    <div><strong>{device.name}</strong><small>{device.last_seen ? `Last seen ${new Date(device.last_seen).toLocaleString()}` : 'Not connected yet'}</small></div>
+                    <div><strong>{device.name}{device.fingerprint ? ` · ${device.fingerprint}` : ''}</strong><small>{device.last_seen ? `Last seen ${new Date(device.last_seen).toLocaleString()}` : 'Not connected yet'}</small></div>
                     <button className="btn btn-secondary" disabled={remoteBusy} onClick={() => {
                       const api = window.electron?.remote
                       if (api) void runRemoteAction(() => api.revokeDevice(device.id))
@@ -485,7 +559,7 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
               <div className="nw-remote-devices__heading"><strong>Paired devices</strong><span>{remoteStatus.paired_devices?.filter(item => !item.revoked).length || 0}</span></div>
               {remoteStatus.paired_devices?.filter(item => !item.revoked).map(device => (
                 <div className="nw-remote-device" key={device.id}>
-                  <div><strong>{device.name}</strong><small>{device.last_seen ? `Last seen ${new Date(device.last_seen).toLocaleString()}` : 'Not connected yet'}</small></div>
+                  <div><strong>{device.name}{device.fingerprint ? ` · ${device.fingerprint}` : ''}</strong><small>{device.last_seen ? `Last seen ${new Date(device.last_seen).toLocaleString()}` : 'Not connected yet'}</small></div>
                   <button className="btn btn-secondary" disabled={remoteBusy} onClick={() => {
                     const api = window.electron?.remote
                     if (api) void runRemoteAction(() => api.revokeDevice(device.id))

@@ -3,6 +3,7 @@ import unicodedata
 
 from fastapi import APIRouter, HTTPException, Path as ApiPath, Query, Response
 
+from services.anime_identity import AnimeIdentityResolver
 from services.exceptions import DependencyUnavailableError
 from services.metadata import MetadataService
 from services.release_search import ReleaseSearchService
@@ -24,6 +25,14 @@ _MOVIE_RELEASE_BOUNDARIES = {
     "remux", "x264", "x265", "h264", "h265", "hevc", "av1",
     "proper", "repack", "internal", "extended", "unrated",
 }
+_MIN_FALLBACK_RESULTS = 3
+_MAX_RELEASE_QUERIES = 5
+_MAX_ANIME_RELEASE_QUERIES = 9
+_MAX_ANIME_RECOVERY_QUERIES = 1
+_ANIME_SHORT_ALIAS_REJECT_TOKENS = {
+    "movie", "ova", "oad", "ona", "special", "specials", "short", "shorts",
+    "recap", "chibi", "petit", "spinoff", "spin-off", "break",
+}
 
 
 def _regex_decimal(value: int, *, minimum: int = 0, maximum: int = 9999) -> str:
@@ -33,11 +42,15 @@ def _regex_decimal(value: int, *, minimum: int = 0, maximum: int = 9999) -> str:
 
 
 def _release_tokens(value: str) -> list[str]:
-    # A few indexers prepend a release-group tag. Ignore at most two simple tags,
-    # then compare the actual media identity rather than arbitrary keyword overlap.
+    # A few indexers prepend one or more release-group tags. Ignore a small,
+    # bounded set of common decorative tag styles, then compare the actual media
+    # identity rather than arbitrary keyword overlap.
     cleaned = value or ""
-    for _ in range(2):
-        match = re.match(r"^\s*\[[^\]\r\n]{1,80}\]\s*", cleaned)
+    leading_tag = re.compile(
+        r"^\s*(?:\[[^\]\r\n]{1,80}\]|【[^】\r\n]{1,80}】|〖[^〗\r\n]{1,80}〗|［[^］\r\n]{1,80}］)\s*"
+    )
+    for _ in range(4):
+        match = leading_tag.match(cleaned)
         if not match:
             break
         cleaned = cleaned[match.end():]
@@ -53,8 +66,8 @@ def _title_variants(title: str) -> list[list[str]]:
         return []
     variants = [tokens]
 
-    # Release names commonly compact punctuated acronyms: S.W.A.T. -> SWAT and
-    # 9-1-1: Lone Star -> 911 Lone Star. Compact only runs of 2+ single tokens.
+    # Release names commonly compact punctuated acronyms and numeric title runs.
+    # Compact only runs of 2+ single tokens.
     compacted: list[str] = []
     run: list[str] = []
     for token in tokens + [""]:
@@ -69,8 +82,8 @@ def _title_variants(title: str) -> list[list[str]]:
     if compacted != tokens:
         variants.append(compacted)
 
-    # A colon-delimited subtitle is sometimes abbreviated in release names, e.g.
-    # Law & Order: Special Victims Unit -> Law and Order SVU.
+    # A colon-delimited subtitle is sometimes abbreviated to an acronym in
+    # release names.
     if ":" in title:
         prefix, suffix = title.split(":", 1)
         prefix_tokens = _release_tokens(prefix)
@@ -84,13 +97,87 @@ def _title_variants(title: str) -> list[list[str]]:
     return variants
 
 
-def _media_aliases(item: dict) -> list[str]:
+def _normalize_release_alias(value: str) -> str:
+    normalized = unicodedata.normalize("NFC", str(value or ""))
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = re.sub(r"\s+([:!?])", r"\1", normalized)
+    return normalized[:160]
+
+
+def _short_release_alias(value: str) -> str | None:
+    # Only shorten an explicit dash-delimited subtitle. Colons remain part of
+    # the canonical identity and are never treated as subtitle delimiters.
+    match = re.match(r"^(.{2,80}?)\s+[-–—]\s*\S.{3,}$", value)
+    if not match:
+        return None
+    shortened = _normalize_release_alias(match.group(1))
+    return shortened if len(_release_tokens(shortened)) <= 6 else None
+
+
+def _media_aliases(item: dict, *, include_short: bool = True) -> list[str]:
     aliases: list[str] = []
-    for key in ("title", "original_title"):
-        value = str(item.get(key) or "").strip()
-        if value and value.casefold() not in {alias.casefold() for alias in aliases}:
+    candidates = [item.get("title"), item.get("original_title")]
+    alternatives = item.get("alternative_titles")
+    if isinstance(alternatives, list):
+        candidates.extend(alternatives[:12])
+    for candidate in candidates:
+        value = _normalize_release_alias(candidate)
+        comparison = unicodedata.normalize("NFKC", value).casefold()
+        if value and comparison not in {
+            unicodedata.normalize("NFKC", alias).casefold() for alias in aliases
+        }:
             aliases.append(value)
-    return aliases
+        if len(aliases) >= 8:
+            break
+    if include_short and aliases:
+        shortened = _short_release_alias(aliases[0])
+        if shortened and shortened.casefold() not in {alias.casefold() for alias in aliases}:
+            aliases.append(shortened)
+    return aliases[:8]
+
+
+def _absolute_episode_number(series: dict, season: int, episode: int) -> int | None:
+    if season <= 0 or episode <= 0:
+        return None
+    seasons = series.get("seasons")
+    if not isinstance(seasons, list):
+        return None
+    counts: dict[int, int] = {}
+    for item in seasons:
+        if not isinstance(item, dict):
+            continue
+        number = item.get("season_number")
+        count = item.get("episode_count")
+        if isinstance(number, bool) or not isinstance(number, int):
+            continue
+        if 0 < number <= season and isinstance(count, int) and not isinstance(count, bool) and 0 < count <= 2000:
+            counts[number] = count
+    if any(number not in counts for number in range(1, season + 1)) or episode > counts[season]:
+        return None
+    prior = sum(counts[number] for number in range(1, season))
+    absolute = prior + episode
+    return absolute if 0 < absolute <= 9999 else None
+
+
+def _identity_prefix_matches(prefix: str, aliases: list[str], year: str | None) -> bool:
+    prefix_tokens = _release_tokens(prefix)
+    target_year = str(year or "").strip()
+    for alias in aliases:
+        for expected in _title_variants(alias):
+            if prefix_tokens[:len(expected)] != expected:
+                continue
+            extras = prefix_tokens[len(expected):]
+            if not extras:
+                return True
+            if target_year and extras == [target_year]:
+                return True
+            if len(extras) == 1 and extras[0] in _REGION_DISAMBIGUATORS:
+                return True
+            if target_year and len(extras) == 2 and target_year in extras:
+                other = extras[1] if extras[0] == target_year else extras[0]
+                if other in _REGION_DISAMBIGUATORS:
+                    return True
+    return False
 
 
 def _series_release_identity_matches(
@@ -113,24 +200,7 @@ def _series_release_identity_matches(
     if marker is None:
         return False
 
-    prefix_tokens = _release_tokens((release_title or "")[:marker.start()])
-    target_year = str(year or "").strip()
-    for alias in aliases:
-        for expected in _title_variants(alias):
-            if prefix_tokens[:len(expected)] != expected:
-                continue
-            extras = prefix_tokens[len(expected):]
-            if not extras:
-                return True
-            if target_year and extras == [target_year]:
-                return True
-            if len(extras) == 1 and extras[0] in _REGION_DISAMBIGUATORS:
-                return True
-            if target_year and len(extras) == 2 and target_year in extras:
-                other = extras[1] if extras[0] == target_year else extras[0]
-                if other in _REGION_DISAMBIGUATORS:
-                    return True
-    return False
+    return _identity_prefix_matches((release_title or "")[:marker.start()], aliases, year)
 
 
 def _movie_release_identity_matches(release_title: str, aliases: list[str], year: str | None) -> bool:
@@ -160,6 +230,34 @@ def episode_query(title: str, season: int, episode: int) -> str:
     return f"{title} S{season:02d}E{episode:02d}"
 
 
+def _anime_installment_queries(
+    aliases: list[str],
+    season: int,
+    episode: int,
+    installment_episode: int,
+) -> list[str]:
+    """Build bounded searches for a proven AniList installment identity.
+
+    Release indexers mix three coordinate conventions: the metadata season
+    coordinate (S04E15), an installment-local coordinate (S01E15), and a bare
+    local episode (15). Search all three for AniList's romaji alias, then one
+    bare fallback for its English alias. The strict title matcher still decides
+    which returned rows belong to the selected episode.
+    """
+    if not aliases or installment_episode <= 0:
+        return []
+    primary = aliases[0]
+    queries = [
+        episode_query(primary, season, episode),
+        f"{primary} {installment_episode:02d}",
+    ]
+    if (season, episode) != (1, installment_episode):
+        queries.append(episode_query(primary, 1, installment_episode))
+    if len(aliases) > 1:
+        queries.append(f"{aliases[1]} {installment_episode:02d}")
+    return queries
+
+
 def _episode_title_matches(title: str, season: int, episode: int) -> bool:
     normalized = title or ""
     season_token = _regex_decimal(season)
@@ -171,54 +269,425 @@ def _episode_title_matches(title: str, season: int, episode: int) -> bool:
     return any(re.search(pattern, normalized, re.I) for pattern in patterns)
 
 
-def _anime_episode_title_matches(title: str, season: int, episode: int) -> bool:
-    if _episode_title_matches(title, season, episode):
-        return True
+def _anime_identity_segments(prefix: str) -> list[str]:
+    segments = [prefix or ""]
+    segments.extend(
+        segment
+        for segment in re.split(r"[\/／|｜_]+", prefix or "")
+        if segment.strip()
+    )
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for segment in segments:
+        normalized = unicodedata.normalize("NFKC", segment).casefold().strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            deduped.append(segment)
+    return deduped
 
+
+def _anime_short_alias_prefix_matches(
+    prefix: str,
+    short_alias: str | None,
+    year: str | None,
+) -> bool:
+    """Match a conservative short alias against longer anime release identities.
+
+    Some anime indexers publish localized, original-script, and romanized names in
+    the same release title. Metadata may only provide a short localized alias. This
+    exception is intentionally limited to absolute-episode matching; normal TV and
+    movie identity checks remain strict.
+    """
+    if not short_alias:
+        return False
+
+    target_year = str(year or "").strip()
+    for candidate in _anime_identity_segments(prefix):
+        prefix_tokens = _release_tokens(candidate)
+        for expected in _title_variants(short_alias):
+            if len(expected) < 2:
+                continue
+
+            # Decorative group tags are stripped by _release_tokens(). Explicit
+            # multilingual separators are split above, so the alias still has to
+            # begin a meaningful title segment rather than occur arbitrarily inside
+            # an unrelated release name.
+            if prefix_tokens[:len(expected)] != expected:
+                continue
+
+            extras = prefix_tokens[len(expected):]
+            if target_year and extras[-1:] == [target_year]:
+                extras = extras[:-1]
+            if extras[-1:] and extras[-1] in _REGION_DISAMBIGUATORS:
+                extras = extras[:-1]
+
+            # Exact short-alias matches are handled by _identity_prefix_matches().
+            # Here we only permit a bounded longer identity, which covers romanized
+            # naming without turning the short alias into a general keyword match.
+            if len(extras) < 2 or len(extras) > 16:
+                continue
+            if any(token in _ANIME_SHORT_ALIAS_REJECT_TOKENS for token in extras):
+                continue
+            return True
+    return False
+
+
+def _anime_identity_matches_prefix(
+    prefix: str,
+    aliases: list[str],
+    year: str | None,
+    short_alias: str | None,
+) -> bool:
+    if any(_identity_prefix_matches(segment, aliases, year) for segment in _anime_identity_segments(prefix)):
+        return True
+    return _anime_short_alias_prefix_matches(prefix, short_alias, year)
+
+
+def _anime_series_coordinate_matches(
+    title: str,
+    aliases: list[str],
+    year: str | None,
+    season: int,
+    episode: int,
+    short_alias: str | None,
+) -> bool:
+    season_token = _regex_decimal(season)
+    episode_token = _regex_decimal(episode)
+    for pattern in (
+        rf"\bS0*{season_token}E0*{episode_token}\b",
+        rf"\b0*{season_token}x0*{episode_token}\b",
+    ):
+        marker = re.search(pattern, title or "", re.I)
+        if marker and _anime_identity_matches_prefix(
+            (title or "")[:marker.start()], aliases, year, short_alias
+        ):
+            return True
+    return False
+
+
+def _anime_absolute_episode_pattern(absolute_episode: int) -> re.Pattern[str]:
+    episode_value = _regex_decimal(absolute_episode)
+    return re.compile(
+        rf"(?:"
+        rf"(?:^|[^\w]|_)(?:(?:e(?:p(?:isode)?)?|#)[\s._\-:#]*)?0*{episode_value}(?:v\d+)?(?=$|[^\w]|_)"
+        rf"|(?:总|總)?第\s*0*{episode_value}(?:\s*[集話话])?(?:v\d+)?(?=$|[^\w]|_)"
+        rf")",
+        re.I,
+    )
+
+
+def _anime_explicit_overall_episode_pattern(absolute_episode: int) -> re.Pattern[str]:
+    episode_value = _regex_decimal(absolute_episode)
+    return re.compile(
+        rf"(?:"
+        rf"(?:总|總)?第\s*0*{episode_value}(?:\s*[集話话])?"
+        rf"|\b(?:overall|total|absolute|abs)\s*(?:(?:episode|ep|e)\s*)?[#:\-]?\s*0*{episode_value}\b"
+        rf")",
+        re.I,
+    )
+
+
+def _anime_alternate_coordinate(
+    title: str,
+    aliases: list[str],
+    year: str | None,
+    absolute_episode: int,
+    short_alias: str | None,
+) -> tuple[int, int] | None:
+    """Infer a broadcast-style coordinate from a release that also names the absolute episode.
+
+    This is deliberately evidence-based. A coordinate is only returned when the
+    release identity matches and the same title contains the requested absolute
+    episode plus an explicit season/local-episode relationship.
+    """
+    value = title or ""
+    for absolute_marker in _anime_explicit_overall_episode_pattern(absolute_episode).finditer(value):
+        prefix = value[:absolute_marker.start()]
+        if not _anime_identity_matches_prefix(prefix, aliases, year, short_alias):
+            continue
+
+        # Strongest form: the release itself contains an SxxEyy coordinate before
+        # the absolute marker.
+        explicit = list(re.finditer(r"\bS0*(\d{1,2})E0*(\d{1,3})\b", prefix, re.I))
+        if explicit:
+            season = int(explicit[-1].group(1))
+            episode = int(explicit[-1].group(2))
+            if 0 < season <= 99 and 0 < episode <= 999:
+                return season, episode
+
+        # Some release names state a season identity, then put the local episode
+        # immediately before an explicit overall/absolute marker.
+        season_markers: list[tuple[int, int]] = []
+        for match in re.finditer(r"\bS(?:eason)?\s*0*(\d{1,2})\b", prefix, re.I):
+            season_markers.append((match.start(), int(match.group(1))))
+        for match in re.finditer(r"\b(\d{1,2})(?:st|nd|rd|th)\s+Season\b", prefix, re.I):
+            season_markers.append((match.start(), int(match.group(1))))
+        if not season_markers:
+            continue
+        season = max(season_markers, key=lambda item: item[0])[1]
+
+        local = re.search(r"(?:^|[^\w])0*(\d{1,3})\s*[-–—~:]\s*$", prefix)
+        if local:
+            episode = int(local.group(1))
+            if 0 < season <= 99 and 0 < episode <= 999:
+                return season, episode
+    return None
+
+
+def _anime_episode_title_matches(
+    title: str,
+    aliases: list[str],
+    year: str | None,
+    season: int,
+    episode: int,
+    absolute_episode: int | None,
+    short_alias: str | None = None,
+) -> bool:
+    if _anime_series_coordinate_matches(title, aliases, year, season, episode, short_alias):
+        return True
     # Anime releases frequently use a simple absolute/episode number instead of
     # SxxEyy. Keep this conservative and reject obvious packs/batches so the
     # existing largest-video auto-selection cannot accidentally choose a season pack.
     lowered = (title or "").lower()
     if any(token in lowered for token in (" batch", "complete", "season pack", "全集")):
         return False
+    if absolute_episode is None:
+        return False
+    episode_value = _regex_decimal(absolute_episode)
+    # A plain numeric range is a pack even when the title omits words such as
+    # "batch" or "complete". Require a real token boundary before the first
+    # range number so season labels such as S01 - 81 are not mistaken for 01-81.
+    if re.search(rf"(?<![\w])\d{{1,4}}\s*[-–—~]\s*0*{episode_value}(?![\w])", title or "", re.I):
+        return False
+    if re.search(rf"(?<![\w])0*{episode_value}\s*[-–—~]\s*\d{{1,4}}(?![\w])", title or "", re.I):
+        return False
 
-    episode_value = _regex_decimal(episode)
-    episode_token = re.compile(
-        rf"(?:^|[\s._\-\[\(])(?:ep(?:isode)?[\s._\-]*)?0*{episode_value}(?:v\d+)?(?=$|[\s._\-\]\)])",
-        re.I,
-    )
-    return bool(episode_token.search(title or ""))
+    # Absolute-number releases appear in several common forms: a separated bare
+    # number, E/EP/Episode/# markers, or an explicit ordinal/overall marker.
+    # Evaluate every candidate occurrence because title decorations may contain
+    # other numbers before the actual episode marker.
+    episode_token = _anime_absolute_episode_pattern(absolute_episode)
+    for marker in episode_token.finditer(title or ""):
+        prefix = (title or "")[:marker.start()]
+        if _anime_identity_matches_prefix(prefix, aliases, year, short_alias):
+            return True
+    return False
+
+
+async def _bounded_anime_search(
+    queries: list[str],
+    *,
+    imdb_id: str | None,
+    min_seeders: int,
+    aliases: list[str],
+    year: str | None,
+    season: int,
+    episode: int,
+    absolute_episode: int,
+    short_alias: str | None,
+    extra_matcher=None,
+) -> tuple[list[str], list[dict]]:
+    attempts: list[str] = []
+    accepted: list[dict] = []
+    observed: list[dict] = []
+
+    def base_matcher(release_title: str) -> bool:
+        matched = _anime_episode_title_matches(
+            release_title,
+            aliases,
+            year,
+            season,
+            episode,
+            absolute_episode,
+            short_alias,
+        )
+        return matched or bool(extra_matcher and extra_matcher(release_title))
+
+    for query in _dedupe_queries(queries, max_queries=_MAX_ANIME_RELEASE_QUERIES):
+        attempts.append(query)
+        raw = await ReleaseSearchService.search(
+            query=query,
+            imdb_id=imdb_id,
+            min_seeders=min_seeders,
+            max_results=80,
+        )
+        observed = ReleaseSearchService.merge([*observed, *raw], max_results=160)
+        accepted = ReleaseSearchService.merge([
+            *accepted,
+            *(item for item in raw if base_matcher(item.get("title") or "")),
+        ], max_results=80)
+        if len(accepted) >= _MIN_FALLBACK_RESULTS:
+            break
+
+    # If metadata uses continuous numbering while releases use a broadcast-style
+    # season coordinate, infer that coordinate only from a matching release that
+    # explicitly ties it to the requested absolute episode. Then allow one extra,
+    # bounded targeted query for that coordinate.
+    coordinate_counts: dict[tuple[int, int], int] = {}
+    for item in observed:
+        coordinate = _anime_alternate_coordinate(
+            item.get("title") or "",
+            aliases,
+            year,
+            absolute_episode,
+            short_alias,
+        )
+        if coordinate and coordinate != (season, episode):
+            coordinate_counts[coordinate] = coordinate_counts.get(coordinate, 0) + 1
+
+    if coordinate_counts:
+        alternate = max(coordinate_counts, key=lambda value: (coordinate_counts[value], -value[0], -value[1]))
+
+        def alternate_matcher(release_title: str) -> bool:
+            return base_matcher(release_title) or _anime_series_coordinate_matches(
+                release_title,
+                aliases,
+                year,
+                alternate[0],
+                alternate[1],
+                short_alias,
+            )
+
+        accepted = ReleaseSearchService.merge([
+            *accepted,
+            *(item for item in observed if alternate_matcher(item.get("title") or "")),
+        ], max_results=80)
+
+        recovery_alias = short_alias or (aliases[0] if aliases else "")
+        recovery_query = (
+            f"{recovery_alias} S{alternate[0]:02d}E{alternate[1]:02d}"
+            if recovery_alias else ""
+        )
+        if recovery_query and all(
+            unicodedata.normalize("NFKC", recovery_query).casefold()
+            != unicodedata.normalize("NFKC", attempt).casefold()
+            for attempt in attempts
+        ):
+            for _ in range(_MAX_ANIME_RECOVERY_QUERIES):
+                attempts.append(recovery_query)
+                raw = await ReleaseSearchService.search(
+                    query=recovery_query,
+                    imdb_id=imdb_id,
+                    min_seeders=min_seeders,
+                    max_results=80,
+                )
+                accepted = ReleaseSearchService.merge([
+                    *accepted,
+                    *(item for item in raw if alternate_matcher(item.get("title") or "")),
+                ], max_results=80)
+                break
+
+    return attempts, accepted
+
+
+def _dedupe_queries(values: list[str], *, max_queries: int = _MAX_RELEASE_QUERIES) -> list[str]:
+    queries: list[str] = []
+    comparisons: set[str] = set()
+    for value in values:
+        normalized = _normalize_release_alias(value)
+        comparison = unicodedata.normalize("NFKC", normalized).casefold()
+        if normalized and comparison not in comparisons:
+            comparisons.add(comparison)
+            queries.append(normalized)
+        if len(queries) >= max_queries:
+            break
+    return queries
+
+
+async def _bounded_search(
+    queries: list[str],
+    *,
+    imdb_id: str | None,
+    min_seeders: int,
+    matcher,
+    max_queries: int = _MAX_RELEASE_QUERIES,
+) -> tuple[list[str], list[dict]]:
+    attempts: list[str] = []
+    accepted: list[dict] = []
+    for query in _dedupe_queries(queries, max_queries=max_queries):
+        attempts.append(query)
+        raw = await ReleaseSearchService.search(
+            query=query,
+            imdb_id=imdb_id,
+            min_seeders=min_seeders,
+            max_results=80,
+        )
+        accepted = ReleaseSearchService.merge([
+            *accepted,
+            *(item for item in raw if matcher(item.get("title") or "")),
+        ], max_results=80)
+        if len(accepted) >= _MIN_FALLBACK_RESULTS:
+            break
+    return attempts, accepted
 
 
 async def _movie_payload(tmdb_id: int, min_seeders: int) -> dict:
     movie = await MetadataService.get_movie(tmdb_id)
     title = (movie.get("title") or "").strip()
     results: list[dict] = []
+    query_attempts: list[str] = []
     release_error = None
+    anime_identity = {
+        "status": "ANILIST_DISABLED",
+        "source": "tmdb",
+        "confidence": "none",
+    }
 
     if title:
         try:
-            results = await ReleaseSearchService.search(
-                query=title,
+            aliases = _media_aliases(movie)
+            query_aliases = [*aliases]
+            if movie.get("is_anime"):
+                try:
+                    resolved = await AnimeIdentityResolver.resolve_movie(movie)
+                    anime_identity = {
+                        key: resolved.get(key)
+                        for key in (
+                            "status", "source", "confidence", "anilist_id",
+                            "anilist_year", "evidence", "reason", "media_strategy",
+                        )
+                        if resolved.get(key) is not None
+                    }
+                    resolved_aliases = resolved.get("aliases")
+                    if resolved.get("confidence") == "high" and isinstance(resolved_aliases, list):
+                        enriched: list[str] = []
+                        seen = {unicodedata.normalize("NFKC", value).casefold() for value in aliases}
+                        for candidate in resolved_aliases:
+                            value = _normalize_release_alias(candidate)
+                            comparison = unicodedata.normalize("NFKC", value).casefold()
+                            if value and comparison not in seen:
+                                seen.add(comparison)
+                                enriched.append(value)
+                            if len(enriched) >= 8:
+                                break
+                        aliases = [*aliases, *enriched]
+                        query_aliases = [*enriched, *query_aliases]
+                except Exception:
+                    anime_identity = {
+                        "status": "ANILIST_UNAVAILABLE",
+                        "source": "tmdb",
+                        "confidence": "none",
+                    }
+            query_attempts, results = await _bounded_search(
+                query_aliases,
                 imdb_id=movie.get("imdb_id"),
                 min_seeders=min_seeders,
-            )
-            if not movie.get("is_anime"):
-                aliases = _media_aliases(movie)
-                results = [
-                    item for item in results
-                    if _movie_release_identity_matches(
-                        item.get("title") or "", aliases, movie.get("year")
+                matcher=(
+                    lambda release_title: _movie_release_identity_matches(
+                        release_title, aliases, movie.get("year")
                     )
-                ]
+                ),
+            )
         except DependencyUnavailableError as exc:
             release_error = {"service": exc.service, "error": exc.message}
 
     return {
         "movie": movie,
         "query": title,
+        "query_attempts": query_attempts,
         "results": results,
         "release_error": release_error,
+        "anime_identity": anime_identity,
     }
 
 
@@ -402,51 +871,156 @@ async def episode_stream_options(
 
     title = (series.get("title") or "").strip()
     query = episode_query(title, season_number, episode_number)
-    query_attempts = [query]
+    query_attempts: list[str] = []
     results: list[dict] = []
     release_error = None
+    is_anime = bool(anime or series.get("is_anime"))
+    aliases = _media_aliases(series, include_short=False)
+    short_alias = _short_release_alias(title)
+    absolute_episode = _absolute_episode_number(series, season_number, episode_number) if is_anime else None
+    anime_identity = {
+        "status": "ANILIST_DISABLED" if not is_anime else "ANILIST_UNAVAILABLE",
+        "source": "tmdb",
+        "confidence": "none",
+    }
+    installment_aliases: list[str] = []
+    installment_episode: int | None = None
+    installment_year: str | None = None
+
+    if is_anime:
+        try:
+            resolved = await AnimeIdentityResolver.resolve(
+                series,
+                season_number,
+                episode_number,
+                absolute_episode,
+            )
+            anime_identity = {
+                key: resolved.get(key)
+                for key in (
+                    "status", "source", "confidence", "anilist_id",
+                    "anilist_year", "installment_episode", "evidence", "reason",
+                )
+                if resolved.get(key) is not None
+            }
+            if resolved.get("confidence") == "high":
+                episode_value = resolved.get("installment_episode")
+                installment_episode = (
+                    episode_value
+                    if isinstance(episode_value, int)
+                    and not isinstance(episode_value, bool)
+                    and 0 < episode_value <= 9999
+                    else None
+                )
+                year_value = resolved.get("anilist_year")
+                installment_year = str(year_value) if year_value else series.get("year")
+                seen_aliases: set[str] = set()
+                resolved_aliases = resolved.get("aliases")
+                for candidate in resolved_aliases if isinstance(resolved_aliases, list) else []:
+                    value = _normalize_release_alias(candidate)
+                    comparison = unicodedata.normalize("NFKC", value).casefold()
+                    if value and comparison not in seen_aliases:
+                        seen_aliases.add(comparison)
+                        installment_aliases.append(value)
+                    if len(installment_aliases) >= 8:
+                        break
+        except Exception:
+            # Identity enrichment is optional. An internal/provider failure must
+            # preserve the existing strict TMDB matcher and bounded query path.
+            anime_identity = {
+                "status": "ANILIST_UNAVAILABLE",
+                "source": "tmdb",
+                "confidence": "none",
+            }
 
     try:
-        raw = await ReleaseSearchService.search(
-            query=query,
-            imdb_id=series.get("imdb_id"),
-            min_seeders=min_seeders,
-            max_results=80,
-        )
-        if anime or series.get("is_anime"):
-            results = [
-                item for item in raw
-                if _anime_episode_title_matches(
-                    item.get("title") or "", season_number, episode_number
+        legacy_query_candidates: list[str] = [query]
+        if is_anime and absolute_episode is not None:
+            legacy_query_candidates.append(f"{title} {absolute_episode:02d}")
+        for alias in aliases[1:2]:
+            legacy_query_candidates.append(episode_query(alias, season_number, episode_number))
+            if is_anime and absolute_episode is not None:
+                legacy_query_candidates.append(f"{alias} {absolute_episode:02d}")
+        if is_anime and absolute_episode is not None and short_alias:
+            legacy_query_candidates.append(f"{short_alias} {absolute_episode:02d}")
+
+        # A high-confidence AniList match should improve the first searches, not
+        # merely add an English S01 query at the tail. All legacy fallbacks remain
+        # inside the same explicit bound, including the short absolute query.
+        query_candidates: list[str] = []
+        if installment_aliases and installment_episode:
+            query_candidates.extend(_anime_installment_queries(
+                installment_aliases,
+                season_number,
+                episode_number,
+                installment_episode,
+            ))
+        query_candidates.extend(legacy_query_candidates)
+
+        if is_anime:
+            matching_aliases = [*aliases, *installment_aliases]
+            if short_alias and short_alias.casefold() not in {value.casefold() for value in matching_aliases}:
+                matching_aliases.append(short_alias)
+            installment_short_alias = (
+                _short_release_alias(installment_aliases[0]) if installment_aliases else None
+            )
+
+            def installment_matcher(release_title: str) -> bool:
+                if not installment_aliases or not installment_episode:
+                    return False
+                return _anime_episode_title_matches(
+                    release_title,
+                    installment_aliases,
+                    installment_year,
+                    1,
+                    installment_episode,
+                    installment_episode,
+                    installment_short_alias,
                 )
-            ]
-        else:
-            aliases = _media_aliases(series)
-            results = [
-                item for item in raw
-                if _series_release_identity_matches(
-                    item.get("title") or "",
-                    aliases,
+
+            if absolute_episode is None:
+                matcher = lambda release_title: _anime_series_coordinate_matches(
+                    release_title,
+                    matching_aliases,
                     series.get("year"),
                     season_number,
                     episode_number,
+                    short_alias,
+                ) or installment_matcher(release_title)
+                query_attempts, results = await _bounded_search(
+                    query_candidates,
+                    imdb_id=series.get("imdb_id"),
+                    min_seeders=min_seeders,
+                    matcher=matcher,
+                    max_queries=_MAX_ANIME_RELEASE_QUERIES,
                 )
-            ]
-
-        if not results and (anime or series.get("is_anime")):
-            # Many anime indexers use absolute episode numbering and omit SxxEyy.
-            # Retry once with the title + episode number, still filtering out packs.
-            alt_query = f"{title} {episode_number:02d}"
-            query_attempts.append(alt_query)
-            raw = await ReleaseSearchService.search(
-                query=alt_query,
+            else:
+                query_attempts, results = await _bounded_anime_search(
+                    query_candidates,
+                    imdb_id=series.get("imdb_id"),
+                    min_seeders=min_seeders,
+                    aliases=matching_aliases,
+                    year=series.get("year"),
+                    season=season_number,
+                    episode=episode_number,
+                    absolute_episode=absolute_episode,
+                    short_alias=short_alias,
+                    extra_matcher=installment_matcher,
+                )
+        else:
+            matcher = lambda release_title: _series_release_identity_matches(
+                release_title,
+                aliases,
+                series.get("year"),
+                season_number,
+                episode_number,
+            )
+            query_attempts, results = await _bounded_search(
+                query_candidates,
                 imdb_id=series.get("imdb_id"),
                 min_seeders=min_seeders,
-                max_results=80,
+                matcher=matcher,
             )
-            results = [item for item in raw if _anime_episode_title_matches(
-                item.get("title") or "", season_number, episode_number
-            )]
     except DependencyUnavailableError as exc:
         release_error = {"service": exc.service, "error": exc.message}
 
@@ -457,5 +1031,7 @@ async def episode_stream_options(
         "query_attempts": query_attempts,
         "results": results,
         "release_error": release_error,
-        "anime": bool(anime or series.get("is_anime")),
+        "anime": is_anime,
+        "absolute_episode": absolute_episode,
+        "anime_identity": anime_identity,
     }

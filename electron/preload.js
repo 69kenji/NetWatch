@@ -15,6 +15,14 @@ contextBridge.exposeInMainWorld('electron', {
     maximize: () => ipcRenderer.send('window:maximize'),
     close: () => ipcRenderer.send('window:close'),
   },
+  settings: {
+    get: () => ipcRenderer.invoke('settings:get'),
+    update: (patch) => ipcRenderer.invoke('settings:update', patch),
+  },
+  keepWatching: {
+    getState: () => ipcRenderer.invoke('keep-watching:get-state'),
+    onChanged: (callback) => subscribe('keep-watching:changed', callback),
+  },
   runtime: {
     getStatus: () => ipcRenderer.invoke('runtime:get-status'),
     retry: () => ipcRenderer.invoke('runtime:retry'),
