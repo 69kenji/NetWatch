@@ -1,5 +1,19 @@
 # NetWatch
-
+<p align="center">
+  <a href="https://github.com/69kenji/netwatch/releases/latest">
+    <img alt="Release" src="https://img.shields.io/github/v/release/69kenji/netwatch?style=flat-square&color=7c5cff">
+  </a>
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows-0078D4?style=flat-square&logo=windows11">
+  <a href="https://github.com/69kenji/netwatch/blob/main/LICENSE">
+    <img alt="License" src="https://img.shields.io/github/license/69kenji/netwatch?style=flat-square">
+  </a>
+  <a href="https://github.com/69kenji/netwatch/issues">
+    <img alt="Issues" src="https://img.shields.io/github/issues/69kenji/netwatch?style=flat-square">
+  </a>
+  <a href="https://github.com/69kenji/netwatch/releases">
+    <img alt="Downloads" src="https://img.shields.io/github/downloads/69kenji/netwatch/total?style=flat-square">
+  </a>
+</p>
 <p align="center">
   <img
     src="https://github.com/user-attachments/assets/25b082e7-53be-4ce0-8ae4-61bcdada226a"
