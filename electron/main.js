@@ -192,7 +192,9 @@ async function startNormalDesktop() {
     console.error('[Runtime startup]', error)
   })
   await runtimeController.ensureRendererBuild()
-  if (!desktopShell.getMainWindow() || desktopShell.getMainWindow().isDestroyed()) desktopShell.createMainWindow()
+  if (!desktopShell.getMainWindow() || desktopShell.getMainWindow().isDestroyed()) {
+    desktopShell.createMainWindow({ show: !desktopShell.shouldStartMinimized() })
+  }
   desktopShell.createTray()
   sendRuntimeStatus()
   sendKeepWatchingChanged()
@@ -213,6 +215,7 @@ const runtimeController = createRuntimeController({
 
 const settingsController = createSettingsController({
   appSettings,
+  applyLoginItemSettings: desktopShell.syncLoginItemSettings,
   backendBaseUrl: BACKEND_BASE_URL,
   getMainWindow: () => desktopShell.getMainWindow(),
   getRuntimeStatus: () => runtimeStatus,
@@ -241,6 +244,11 @@ registerApplicationIpc({
 app.whenReady().then(async () => {
   await desktopShell.registerAppProtocol()
   desktopShell.hardenDefaultSession()
+  try {
+    desktopShell.syncLoginItemSettings()
+  } catch (error) {
+    console.warn('[Startup] Could not synchronize the Windows login item:', error)
+  }
   remoteGateway = new RemoteGatewayController({
     getRuntimeReady: () => Boolean(runtimeStatus.ready),
     isTorrentInDesktopUse: infoHash => player.isTorrentInUse(infoHash),

@@ -4,11 +4,12 @@ import type { NetWatchView } from '../types/torrents'
 type SidebarProps = {
   view: NetWatchView
   runtime: NetWatchRuntimeStatus
+  runtimeOpen: boolean
   onNavigate: (view: NetWatchView) => void
   onRuntimeClick: () => void
 }
 
-export function Sidebar({ view, runtime, onNavigate, onRuntimeClick }: SidebarProps) {
+export function Sidebar({ view, runtime, runtimeOpen, onNavigate, onRuntimeClick }: SidebarProps) {
   const runtimeLabel = runtime.phase === 'error' ? 'Needs attention' : runtime.ready ? 'Ready' : runtime.message || 'Starting'
 
   return (
@@ -50,8 +51,11 @@ export function Sidebar({ view, runtime, onNavigate, onRuntimeClick }: SidebarPr
           type="button"
           onClick={onRuntimeClick}
           className={`nw-runtime-indicator ${runtime.ready ? 'is-ready' : runtime.phase === 'error' ? 'is-error' : 'is-starting'}`}
+          data-runtime-toggle="true"
           data-tooltip={runtimeLabel}
-          aria-label={`Open NetWatch diagnostics: ${runtimeLabel}`}
+          aria-controls="netwatch-runtime-diagnostics"
+          aria-expanded={runtimeOpen}
+          aria-label={`${runtimeOpen ? 'Close' : 'Open'} NetWatch diagnostics: ${runtimeLabel}`}
         >
           {runtime.ready ? (
             <Check width={18} height={18} />

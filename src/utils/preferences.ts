@@ -5,6 +5,8 @@ export type NetWatchUiPreferences = {
   subtitleLanguage: string
   showStartupDetails: boolean
   onClose: 'minimize-to-tray' | 'exit'
+  startWithWindows: boolean
+  startMinimized: boolean
   keepWatchingEnabled: boolean
   keepWatchingLimit: number
   flareSolverrEnabled: boolean
@@ -17,6 +19,8 @@ const DEFAULT_UI_PREFERENCES: NetWatchUiPreferences = {
   subtitleLanguage: 'en',
   showStartupDetails: false,
   onClose: 'exit',
+  startWithWindows: false,
+  startMinimized: false,
   keepWatchingEnabled: true,
   keepWatchingLimit: 5,
   flareSolverrEnabled: false,
@@ -41,6 +45,8 @@ export function loadUiPreferences(): NetWatchUiPreferences {
         : DEFAULT_UI_PREFERENCES.subtitleLanguage,
       showStartupDetails: Boolean(parsed?.showStartupDetails),
       onClose: parsed?.onClose === 'minimize-to-tray' ? 'minimize-to-tray' : 'exit',
+      startWithWindows: Boolean(parsed?.startWithWindows),
+      startMinimized: Boolean(parsed?.startMinimized),
       keepWatchingEnabled: typeof parsed?.keepWatchingEnabled === 'boolean' ? parsed.keepWatchingEnabled : true,
       keepWatchingLimit: Number.isInteger(parsed?.keepWatchingLimit) && parsed.keepWatchingLimit >= 1 && parsed.keepWatchingLimit <= 20
         ? parsed.keepWatchingLimit

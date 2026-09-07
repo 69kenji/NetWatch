@@ -330,6 +330,35 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
 
         <section className="nw-settings-card nw-settings-card--compact">
           <div className="nw-settings-card__copy">
+            <strong>Start with Windows</strong>
+          </div>
+          <select
+            className="nw-settings-select"
+            value={preferences.startWithWindows ? 'enabled' : 'disabled'}
+            onChange={event => update({ startWithWindows: event.target.value === 'enabled' })}
+          >
+            <option value="disabled">Disabled</option>
+            <option value="enabled">Enabled</option>
+          </select>
+        </section>
+
+        <section className="nw-settings-card nw-settings-card--compact">
+          <div className="nw-settings-card__copy">
+            <strong>On startup</strong>
+          </div>
+          <select
+            className="nw-settings-select"
+            value={preferences.startMinimized ? 'minimized' : 'window'}
+            disabled={!preferences.startWithWindows}
+            onChange={event => update({ startMinimized: event.target.value === 'minimized' })}
+          >
+            <option value="window">Open window</option>
+            <option value="minimized">Minimize to tray</option>
+          </select>
+        </section>
+
+        <section className="nw-settings-card nw-settings-card--compact">
+          <div className="nw-settings-card__copy">
             <strong>Keep Watching</strong>
           </div>
           <select

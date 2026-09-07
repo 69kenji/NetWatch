@@ -41,6 +41,7 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "!electron/vite-worker.js",
       "remote-gateway/**/*",
       "package.json"
     ],

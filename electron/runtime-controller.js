@@ -1,7 +1,6 @@
 'use strict'
 
-const { app } = require('electron')
-const { spawn } = require('child_process')
+const { app, utilityProcess } = require('electron')
 const fs = require('fs')
 const path = require('path')
 const { httpOk, sleep, waitForHttp } = require('./process-utils')
@@ -36,19 +35,7 @@ function createRuntimeController({
   async function ensureVite() {
     if (!isDev) return
     if (await httpOk('http://127.0.0.1:5173/', 800)) return
-  
-    const projectRoot = path.resolve(__dirname, '..')
-  
-    // IMPORTANT: keep this launch shape in sync with the exact command that is
-    // already proven to work from Windows PowerShell for this WSL-hosted repo:
-    //
-    //   cmd.exe /d /s /c "pushd \\\\wsl.localhost\\<distro>\\home\\<user>\\projects\\netwatch && npm run dev:react"
-    //
-    // `pushd` is what makes cmd.exe assign a temporary drive letter for the UNC
-    // WSL path. The outer quotes around the complete /c command are significant.
-    // Do not replace this with a UNC cwd or direct node/vite invocation; both have
-    // already been shown to fail with this project layout.
-    const command = `"pushd ${projectRoot} && npm run dev:react -- --host 127.0.0.1 --port 5173 --strictPort"`
+    const viteWorker = path.join(__dirname, 'vite-worker.js')
   
     let recentOutput = ''
     let exited = false
@@ -61,33 +48,27 @@ function createRuntimeController({
       return text.trimEnd()
     }
   
-    viteProcess = spawn('cmd.exe', ['/d', '/s', '/c', command], {
-      shell: false,
-      windowsHide: true,
-      // Node normally performs another layer of Windows argument quoting. For
-      // cmd.exe /s /c that can change the meaning of the outer command quotes.
-      // Pass the arguments verbatim so the resulting command line matches the
-      // known-good manual invocation above.
-      windowsVerbatimArguments: true,
-      cwd: process.env.SystemRoot || 'C:\\Windows',
-      stdio: ['ignore', 'pipe', 'pipe'],
+    viteProcess = utilityProcess.fork(viteWorker, ['serve'], {
+      cwd: app.getPath('temp'),
+      stdio: 'pipe',
       env: {
         ...process.env,
         BROWSER: 'none',
       },
+      serviceName: 'NetWatch Vite Development Server',
     })
     viteOwned = true
-  
-    viteProcess.stdout.on('data', chunk => {
+
+    viteProcess.stdout?.on('data', chunk => {
       const line = rememberOutput('', chunk)
       if (line) console.log('[Vite]', line)
     })
-    viteProcess.stderr.on('data', chunk => {
+    viteProcess.stderr?.on('data', chunk => {
       const line = rememberOutput('', chunk)
       if (line) console.error('[Vite]', line)
     })
-    viteProcess.once('error', error => {
-      spawnError = error
+    viteProcess.once('error', details => {
+      spawnError = new Error(`Vite utility process failed: ${details?.type || 'unknown error'}`)
     })
     viteProcess.once('exit', code => {
       exited = true
@@ -128,56 +109,48 @@ function createRuntimeController({
     const projectRoot = path.resolve(__dirname, '..')
     const distIndex = path.join(projectRoot, 'dist', 'index.html')
     const distPlayer = path.join(projectRoot, 'dist', 'player.html')
-    const command = `"pushd ${projectRoot} && npm run build:renderer"`
-  
+    const viteWorker = path.join(__dirname, 'vite-worker.js')
+
     let recentOutput = ''
-    const child = spawn('cmd.exe', ['/d', '/s', '/c', command], {
-      shell: false,
-      windowsHide: true,
-      windowsVerbatimArguments: true,
-      cwd: process.env.SystemRoot || 'C:\\Windows',
-      stdio: ['ignore', 'pipe', 'pipe'],
+    const child = utilityProcess.fork(viteWorker, ['build'], {
+      cwd: app.getPath('temp'),
+      stdio: 'pipe',
       env: {
         ...process.env,
         BROWSER: 'none',
       },
+      serviceName: 'NetWatch Renderer Build',
     })
-  
+
     const rememberOutput = (prefix, chunk) => {
       const text = chunk.toString()
       recentOutput = `${recentOutput}${prefix}${text}`.slice(-12_000)
       return text.trimEnd()
     }
   
-    child.stdout.on('data', chunk => {
+    child.stdout?.on('data', chunk => {
       const line = rememberOutput('', chunk)
       if (line) console.log('[Renderer build]', line)
     })
-    child.stderr.on('data', chunk => {
+    child.stderr?.on('data', chunk => {
       const line = rememberOutput('', chunk)
       if (line) console.error('[Renderer build]', line)
     })
-  
+
     await new Promise((resolve, reject) => {
       let settled = false
       const timer = setTimeout(() => {
         if (settled) return
         settled = true
-        try {
-          spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
-            shell: false,
-            windowsHide: true,
-            stdio: 'ignore',
-          }).unref()
-        } catch (_) {}
+        child.kill()
         reject(new Error(`Renderer build timed out after 90 seconds.${recentOutput.trim() ? `\n\n${recentOutput.trim()}` : ''}`))
       }, 90_000)
-  
-      child.once('error', error => {
+
+      child.once('error', details => {
         if (settled) return
         settled = true
         clearTimeout(timer)
-        reject(new Error(`Could not launch the hidden renderer build: ${error.message}`))
+        reject(new Error(`Renderer build utility process failed: ${details?.type || 'unknown error'}`))
       })
       child.once('exit', code => {
         if (settled) return
@@ -200,17 +173,11 @@ function createRuntimeController({
   
   function stopOwnedVite() {
     if (!viteOwned || !viteProcess) return
-    const pid = viteProcess.pid
+    const child = viteProcess
     viteOwned = false
     viteProcess = null
-    if (!pid) return
     try {
-      const killer = spawn('taskkill.exe', ['/pid', String(pid), '/t', '/f'], {
-        shell: false,
-        windowsHide: true,
-        stdio: 'ignore',
-      })
-      killer.unref()
+      child.kill()
     } catch (_) {}
   }
   

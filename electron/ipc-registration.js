@@ -1,7 +1,37 @@
 'use strict'
 
-const { app, dialog, ipcMain, shell } = require('electron')
+const { app, clipboard, dialog, ipcMain, shell } = require('electron')
 const { VPNBOOK_REFRESH_URL } = require('./vpn-profile')
+
+const DIAGNOSTIC_SERVICES = Object.freeze([
+  ['docker', 'Docker Desktop'],
+  ['stack', 'VPN Tunnel'],
+  ['backend', 'Backend API'],
+  ['torrentEngine', 'Torrent Engine'],
+  ['prowlarr', 'Prowlarr'],
+])
+
+function diagnosticState(value) {
+  const normalized = String(value || '').toLowerCase()
+  if (normalized.includes('disabled')) return 'disabled'
+  if (['error', 'unhealthy', 'failed', 'dead', 'disconnected', 'not connected', 'unavailable', 'stopped', 'missing'].some(token => normalized.includes(token))) return 'error'
+  if (['ready', 'healthy', 'running', 'ok', 'connected'].some(token => normalized.includes(token))) return 'ready'
+  return 'pending'
+}
+
+function runtimeDiagnosticsText(runtime) {
+  const state = runtime && typeof runtime === 'object' ? runtime : {}
+  const services = state.services && typeof state.services === 'object' ? state.services : {}
+  const runtimeState = state.ready ? 'ready' : diagnosticState(state.phase)
+  return [
+    `NetWatch ${app.getVersion()}`,
+    `Platform: ${process.platform} ${process.arch}`,
+    `Electron: ${process.versions.electron || 'unknown'}`,
+    `Chromium: ${process.versions.chrome || 'unknown'}`,
+    `Runtime: ${runtimeState}`,
+    ...DIAGNOSTIC_SERVICES.map(([key, label]) => `${label}: ${diagnosticState(services[key])}`),
+  ].join('\n')
+}
 
 function registerApplicationIpc({
   appSettings,
@@ -50,6 +80,11 @@ function registerApplicationIpc({
   
   
   ipcMain.handle('runtime:get-status', event => { desktopShell.assertMainRendererSender(event); return { ...getRuntimeStatus(), services: { ...getRuntimeStatus().services } } })
+  ipcMain.handle('diagnostics:copy', event => {
+    desktopShell.assertMainRendererSender(event)
+    clipboard.writeText(runtimeDiagnosticsText(getRuntimeStatus()))
+    return { copied: true }
+  })
   ipcMain.handle('runtime:retry', event => { desktopShell.assertMainRendererSender(event); return runtimeController.retry() })
   ipcMain.handle('runtime:vpn-sanity', event => { desktopShell.assertMainRendererSender(event); return vpnSanityCheck() })
   ipcMain.handle('runtime:get-credential-status', async event => {
@@ -165,4 +200,4 @@ function registerApplicationIpc({
   })
 }
 
-module.exports = { registerApplicationIpc }
+module.exports = { diagnosticState, registerApplicationIpc, runtimeDiagnosticsText }

@@ -5,6 +5,8 @@ const path = require('path')
 const { pathToFileURL } = require('url')
 const { shouldMinimizeOnClose } = require('./window-lifecycle-policy')
 
+const START_MINIMIZED_ARGUMENT = '--netwatch-start-minimized'
+
 function registerAppScheme() {
   protocol.registerSchemesAsPrivileged([{
     scheme: 'app',
@@ -85,12 +87,13 @@ function createDesktopShell({ appSettings, isDev, lifecycle, onForegroundRequest
     webContents.on('will-redirect', blockUnexpectedNavigation)
   }
   
-  function createWindow() {
+  function createWindow({ show = true } = {}) {
     mainWindow = new BrowserWindow({
       width: 1400,
       height: 900,
       minWidth: 1100,
       minHeight: 700,
+      show,
       frame: false,
       backgroundColor: '#0a0a0f',
       webPreferences: {
@@ -219,6 +222,27 @@ function createDesktopShell({ appSettings, isDev, lifecycle, onForegroundRequest
     })
   }
 
+  function syncLoginItemSettings(settings = appSettings.get()) {
+    if (process.platform !== 'win32' || !app.isPackaged) return
+    const startMinimized = Boolean(settings.startWithWindows && settings.startMinimized)
+    app.setLoginItemSettings({
+      openAtLogin: Boolean(settings.startWithWindows),
+      path: process.execPath,
+      args: startMinimized ? [START_MINIMIZED_ARGUMENT] : [],
+    })
+  }
+
+  function shouldStartMinimized() {
+    const settings = appSettings.get()
+    return Boolean(
+      process.platform === 'win32' &&
+      app.isPackaged &&
+      settings.startWithWindows &&
+      settings.startMinimized &&
+      process.argv.includes(START_MINIMIZED_ARGUMENT)
+    )
+  }
+
   return {
     assertMainRendererSender,
     assertWindowSender,
@@ -236,10 +260,12 @@ function createDesktopShell({ appSettings, isDev, lifecycle, onForegroundRequest
     registerAppProtocol,
     rendererUrl,
     sendToMain,
+    shouldStartMinimized,
+    syncLoginItemSettings,
     windowClose: () => mainWindow?.close(),
     windowMaximize: () => { if (mainWindow) (mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize()) },
     windowMinimize: () => mainWindow?.minimize(),
   }
 }
 
-module.exports = { createDesktopShell, registerAppScheme }
+module.exports = { START_MINIMIZED_ARGUMENT, createDesktopShell, registerAppScheme }

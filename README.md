@@ -32,6 +32,8 @@ Torrent, metadata, subtitle, and indexer traffic runs inside a shared Docker/WSL
 - Torrent discovery through your Prowlarr indexers, with optional bundled FlareSolverr support for indexers that need it.
 - Direct libtorrent streaming with seek-aware buffering.
 - Native mpv playback with fullscreen, seeking, audio tracks, subtitles, buffering, and network stats.
+- Local Keep Watching history with resume progress and standard or cinematic Home layouts.
+- Optional Windows startup, background tray operation, and minimized startup.
 - Optional OpenSubtitles and SubDL integration.
 - Inner WireGuard routing with fail-closed startup checks, VPN-side DNS, and optional VPNBook profile reminders.
 - Opt-in, TLS-pinned LAN streaming to the Android client; the PC handles torrents and VPN routing.
@@ -107,6 +109,11 @@ Settings provides two resource profiles:
 - **Reduced** lowers those limits and uses a 4 GiB torrent-buffer ceiling for systems with limited memory.
 
 The buffer value is a maximum tmpfs size, not memory reserved at startup. Reduced mode trades concurrency and seek headroom for lower peak memory use. Prowlarr is required in both profiles; FlareSolverr runs only when enabled.
+
+## Desktop shortcuts
+
+- `Ctrl+K` or `/` opens or focuses search from Home, Discover, Settings, and search results.
+- `Alt+Left` / `Alt+Right` or the mouse Back / Forward buttons move through app navigation history.
 
 ## Build from source
 

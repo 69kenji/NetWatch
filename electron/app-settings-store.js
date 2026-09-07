@@ -1,10 +1,12 @@
 const fs = require('fs')
 const path = require('path')
 
-const SETTINGS_VERSION = 2
+const SETTINGS_VERSION = 3
 const DEFAULT_APP_SETTINGS = Object.freeze({
   version: SETTINGS_VERSION,
   onClose: 'exit',
+  startWithWindows: false,
+  startMinimized: false,
   keepWatchingEnabled: true,
   keepWatchingLimit: 5,
   defaultQuality: 'all',
@@ -40,6 +42,12 @@ function normalizeSettings(value, fallback = DEFAULT_APP_SETTINGS) {
     onClose: candidate.onClose === 'minimize-to-tray' || candidate.onClose === 'exit'
       ? candidate.onClose
       : fallback.onClose,
+    startWithWindows: typeof candidate.startWithWindows === 'boolean'
+      ? candidate.startWithWindows
+      : fallback.startWithWindows,
+    startMinimized: typeof candidate.startMinimized === 'boolean'
+      ? candidate.startMinimized
+      : fallback.startMinimized,
     keepWatchingEnabled: typeof candidate.keepWatchingEnabled === 'boolean'
       ? candidate.keepWatchingEnabled
       : fallback.keepWatchingEnabled,
@@ -91,6 +99,8 @@ class AppSettingsStore {
     if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Settings update is invalid')
     const allowed = new Set([
       'onClose',
+      'startWithWindows',
+      'startMinimized',
       'keepWatchingEnabled',
       'keepWatchingLimit',
       'defaultQuality',

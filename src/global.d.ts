@@ -83,6 +83,8 @@ interface NativePlayerSession {
 interface NetWatchAppSettings {
   version: number
   onClose: 'minimize-to-tray' | 'exit'
+  startWithWindows: boolean
+  startMinimized: boolean
   keepWatchingEnabled: boolean
   keepWatchingLimit: number
   defaultQuality: import('./types/torrents').QualityFilter
@@ -224,6 +226,9 @@ interface Window {
       getState: () => Promise<NetWatchKeepWatchingState>
       remove: (catalogId: string) => Promise<{ removed: boolean; state: NetWatchKeepWatchingState }>
       onChanged: (callback: (state: NetWatchKeepWatchingState) => void) => () => void
+    }
+    diagnostics: {
+      copy: () => Promise<{ copied: boolean }>
     }
     runtime: {
       getStatus: () => Promise<NetWatchRuntimeStatus>

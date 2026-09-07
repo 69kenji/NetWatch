@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { Check, RefreshCircle, WarningTriangle, Xmark } from 'iconoir-react'
 
@@ -18,16 +18,29 @@ const SERVICE_LABELS: Array<[keyof NetWatchRuntimeStatus['services'], string]> =
 
 function stateMode(value: string) {
   const normalized = String(value || '').toLowerCase()
+  if (['error', 'unhealthy', 'failed', 'dead', 'disconnected', 'not connected', 'unavailable', 'stopped', 'missing'].some(token => normalized.includes(token))) return 'error'
   if (['ready', 'healthy', 'running', 'ok', 'connected'].some(token => normalized.includes(token))) return 'ready'
-  if (['error', 'unhealthy', 'failed', 'dead'].some(token => normalized.includes(token))) return 'error'
   return 'pending'
 }
 
 export function RuntimeDiagnostics({ runtime, onClose, onRetry }: Props) {
   const drawerRef = useRef<HTMLElement>(null)
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
+
+  const copyDiagnostics = async () => {
+    try {
+      const api = window.electron?.diagnostics
+      if (!api) throw new Error('Diagnostics bridge unavailable')
+      await api.copy()
+      setCopyState('copied')
+    } catch {
+      setCopyState('error')
+    }
+  }
 
   useEffect(() => {
     const handlePointerDown = (event: PointerEvent) => {
+      if ((event.target as Element | null)?.closest?.('[data-runtime-toggle="true"]')) return
       if (!drawerRef.current?.contains(event.target as Node)) onClose()
     }
 
@@ -37,6 +50,7 @@ export function RuntimeDiagnostics({ runtime, onClose, onRetry }: Props) {
 
   return (
     <motion.aside
+      id="netwatch-runtime-diagnostics"
       ref={drawerRef}
       className="nw-diagnostics-drawer"
       initial={{ x: '100%' }}
@@ -82,11 +96,16 @@ export function RuntimeDiagnostics({ runtime, onClose, onRetry }: Props) {
       </section>
 
       <div className="nw-diagnostics-drawer__spacer" />
-      {!runtime.ready && (
-        <button className="btn btn-primary nw-diagnostics-retry" onClick={onRetry}>
-          <RefreshCircle width={17} height={17} /> Retry
+      <div className="nw-diagnostics-actions">
+        <button className="btn btn-secondary nw-diagnostics-copy" onClick={() => void copyDiagnostics()}>
+          {copyState === 'copied' ? 'Copied' : copyState === 'error' ? 'Copy failed' : 'Copy diagnostics'}
         </button>
-      )}
+        {!runtime.ready && (
+          <button className="btn btn-primary nw-diagnostics-retry" onClick={onRetry}>
+            <RefreshCircle width={17} height={17} /> Retry
+          </button>
+        )}
+      </div>
     </motion.aside>
   )
 }

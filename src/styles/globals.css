@@ -723,6 +723,8 @@ textarea:focus-visible {
 .nw-service-row span { color: #595564; font-size: 8px; }
 .nw-diagnostics-drawer__spacer { flex: 1; min-height: 18px; }
 .nw-diagnostics-retry { width: 100%; height: 42px; border-radius: 11px; font-size: 11px; }
+.nw-diagnostics-actions { display: flex; flex-direction: column; gap: 8px; }
+.nw-diagnostics-copy { width: 100%; height: 38px; border-radius: 10px; font-size: 10px; }
 
 @media (max-width: 940px) {
   .nw-settings-view { padding-left: 24px; padding-right: 24px; }

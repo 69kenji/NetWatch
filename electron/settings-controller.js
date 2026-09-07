@@ -5,6 +5,7 @@ const { waitForHttp } = require('./process-utils')
 
 function createSettingsController({
   appSettings,
+  applyLoginItemSettings,
   backendBaseUrl,
   getMainWindow,
   getRuntimeStatus,
@@ -13,6 +14,7 @@ function createSettingsController({
   wslRuntime,
 }) {
   if (!appSettings || !keepWatching || !wslRuntime) throw new Error('Settings controller dependencies are invalid')
+  if (typeof applyLoginItemSettings !== 'function') throw new Error('Login item settings dependency is invalid')
 
   const {
     composeCommandArgs,
@@ -25,6 +27,12 @@ function createSettingsController({
   async function update(patch) {
     const previous = appSettings.get()
     const applyToRuntime = Boolean(getRuntimeStatus().ready)
+    const loginItemChanged = Boolean(
+      patch && (
+        (patch.startWithWindows !== undefined && patch.startWithWindows !== previous.startWithWindows) ||
+        (patch.startMinimized !== undefined && patch.startMinimized !== previous.startMinimized)
+      )
+    )
     if (patch?.keepWatchingEnabled === false && previous.keepWatchingEnabled) {
       const result = await dialog.showMessageBox(getMainWindow(), {
         type: 'warning',
@@ -50,6 +58,8 @@ function createSettingsController({
     }
     const next = appSettings.update(patch)
     try {
+      if (loginItemChanged) applyLoginItemSettings(next)
+
       if (previous.keepWatchingEnabled && !next.keepWatchingEnabled) keepWatching.disable()
       else if (!previous.keepWatchingEnabled && next.keepWatchingEnabled) keepWatching.enable()
       if (previous.keepWatchingLimit !== next.keepWatchingLimit) keepWatching.applyLimit()
@@ -79,10 +89,17 @@ function createSettingsController({
       }
       return { cancelled: false, settings: next }
     } catch (error) {
-      appSettings.update({
+      const restored = appSettings.update({
+        startWithWindows: previous.startWithWindows,
+        startMinimized: previous.startMinimized,
         flareSolverrEnabled: previous.flareSolverrEnabled,
         resourceProfile: previous.resourceProfile,
       })
+      if (loginItemChanged) {
+        try { applyLoginItemSettings(restored) } catch (restoreError) {
+          console.warn('[Settings] Could not restore the previous Windows login item:', restoreError)
+        }
+      }
       try {
         if (previous.flareSolverrEnabled !== next.flareSolverrEnabled && applyToRuntime) {
           if (previous.flareSolverrEnabled) {

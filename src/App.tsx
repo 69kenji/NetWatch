@@ -65,7 +65,29 @@ const INITIAL_RUNTIME: NetWatchRuntimeStatus = {
 const EMPTY_HOME: TmdbHomePayload = { movies: [], recent_movies: [], tv: [], recent_tv: [], anime: [], recent_anime: [] }
 
 type DetailReturnView = 'home' | 'discover' | 'search'
-type SearchReturnView = 'home' | 'discover'
+type SearchReturnView = 'home' | 'discover' | 'settings'
+type SimpleNavigationView = 'home' | 'discover' | 'settings'
+type NavigationEntry =
+  | { view: SimpleNavigationView }
+  | { view: 'search'; returnView: SearchReturnView }
+  | {
+      view: 'movie'
+      seed: TmdbMovieSummary
+      catalog: CatalogKind
+      data: MovieStreamOptions | null
+      error: string | null
+      returnView: DetailReturnView
+    }
+  | {
+      view: 'series'
+      seed: TmdbSeriesSummary
+      data: TmdbSeriesDetails | null
+      error: string | null
+      anime: boolean
+      returnView: DetailReturnView
+    }
+
+const NAVIGATION_HISTORY_LIMIT = 50
 
 function getErrorMessage(error: unknown) {
   if (error instanceof Error && error.message) return error.message
@@ -279,6 +301,8 @@ export default function App() {
   const discoverRequestId = useRef(0)
   const keepWatchingRequestId = useRef(0)
   const keepWatchingMetadata = useRef(new Map<string, TmdbCatalogSummary>())
+  const navigationBack = useRef<NavigationEntry[]>([])
+  const navigationForward = useRef<NavigationEntry[]>([])
 
   const applyMainSettings = useCallback((settings: NetWatchAppSettings) => {
     setPreferences(current => {
@@ -286,6 +310,8 @@ export default function App() {
         ...current,
         defaultQuality: settings.defaultQuality,
         onClose: settings.onClose,
+        startWithWindows: settings.startWithWindows,
+        startMinimized: settings.startMinimized,
         keepWatchingEnabled: settings.keepWatchingEnabled,
         keepWatchingLimit: settings.keepWatchingLimit,
         flareSolverrEnabled: settings.flareSolverrEnabled,
@@ -425,67 +451,6 @@ export default function App() {
     if (runtime.ready && view === 'search') searchPageRef.current?.focus()
   }, [runtime.ready, view])
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && diagnosticsOpen) {
-        event.preventDefault()
-        setDiagnosticsOpen(false)
-        return
-      }
-      if (event.key === 'Escape' && (view === 'movie' || view === 'series')) {
-        event.preventDefault()
-        setView(detailReturnView)
-        return
-      }
-      if (event.key === 'Escape' && view === 'search') {
-        event.preventDefault()
-        setView(searchReturnView)
-        return
-      }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault()
-        const origin: SearchReturnView = view === 'discover'
-          ? 'discover'
-          : view === 'home'
-            ? 'home'
-            : (view === 'movie' || view === 'series') && detailReturnView !== 'search'
-              ? detailReturnView
-              : searchReturnView
-        setSearchReturnView(origin)
-        setView('search')
-        window.setTimeout(() => searchPageRef.current?.focus(), 0)
-      }
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [diagnosticsOpen, detailReturnView, searchReturnView, view])
-
-  useEffect(() => {
-    const handleMouseBack = (event: MouseEvent) => {
-      if (event.button !== 3) return
-
-      if (diagnosticsOpen) {
-        event.preventDefault()
-        setDiagnosticsOpen(false)
-        return
-      }
-
-      if (view === 'movie' || view === 'series') {
-        event.preventDefault()
-        setView(detailReturnView)
-        return
-      }
-
-      if (view === 'search') {
-        event.preventDefault()
-        setView(searchReturnView)
-      }
-    }
-
-    window.addEventListener('mouseup', handleMouseBack)
-    return () => window.removeEventListener('mouseup', handleMouseBack)
-  }, [diagnosticsOpen, detailReturnView, searchReturnView, view])
-
   const clearDetails = () => {
     ++detailRequestId.current
     setSelectedMovie(null)
@@ -494,7 +459,53 @@ export default function App() {
     setSelectedSeries(null)
     setSeriesData(null)
     setSeriesError(null)
+    setMovieLoading(false)
+    setSeriesLoading(false)
     setOpening(null)
+  }
+
+  const captureNavigationEntry = (): NavigationEntry => {
+    if (view === 'movie' && selectedMovie) {
+      return {
+        view: 'movie',
+        seed: selectedMovie,
+        catalog: selectedMovieCatalog,
+        data: movieData,
+        error: movieError,
+        returnView: detailReturnView,
+      }
+    }
+    if (view === 'series' && selectedSeries) {
+      return {
+        view: 'series',
+        seed: selectedSeries,
+        data: seriesData,
+        error: seriesError,
+        anime: selectedSeriesAnime,
+        returnView: detailReturnView,
+      }
+    }
+    if (view === 'movie' || view === 'series') {
+      return detailReturnView === 'search'
+        ? { view: 'search', returnView: searchReturnView }
+        : { view: detailReturnView }
+    }
+    if (view === 'search') return { view: 'search', returnView: searchReturnView }
+    return { view }
+  }
+
+  const navigationKey = (entry: NavigationEntry) => {
+    if (entry.view === 'movie') return `movie:${entry.seed.id}`
+    if (entry.view === 'series') return `series:${entry.seed.id}`
+    return entry.view
+  }
+
+  const recordNavigation = (next: NavigationEntry) => {
+    const current = captureNavigationEntry()
+    if (navigationKey(current) === navigationKey(next)) return false
+    navigationBack.current = [...navigationBack.current, current].slice(-NAVIGATION_HISTORY_LIMIT)
+    navigationForward.current = []
+    return true
   }
 
   const runSearch = async (event?: FormEvent, directQuery?: string) => {
@@ -503,6 +514,8 @@ export default function App() {
     if (!normalized || searching || !runtime.ready) return
 
     const origin: SearchReturnView = view === 'discover' ? 'discover' : view === 'home' ? 'home' : searchReturnView
+    if (view !== 'search') recordNavigation({ view: 'search', returnView: origin })
+    else navigationForward.current = []
     setSearchReturnView(origin)
     setQuery(normalized)
     setView('search')
@@ -578,10 +591,74 @@ export default function App() {
     }
   }
 
+  const applyNavigationEntry = (entry: NavigationEntry) => {
+    setDiagnosticsOpen(false)
+    if (entry.view === 'movie') {
+      if (!entry.data && !entry.error) {
+        void loadMovie(entry.seed, entry.catalog, entry.returnView)
+        return
+      }
+      ++detailRequestId.current
+      setDetailReturnView(entry.returnView)
+      setSelectedMovie(entry.seed)
+      setSelectedMovieCatalog(entry.catalog)
+      setMovieData(entry.data)
+      setMovieError(entry.error)
+      setMovieLoading(false)
+      setSelectedSeries(null)
+      setSeriesData(null)
+      setSeriesError(null)
+      setSeriesLoading(false)
+      setOpening(null)
+      setView('movie')
+      return
+    }
+    if (entry.view === 'series') {
+      if (!entry.data && !entry.error) {
+        void loadSeries(entry.seed, entry.anime ? 'anime' : 'series', entry.returnView)
+        return
+      }
+      ++detailRequestId.current
+      setDetailReturnView(entry.returnView)
+      setSelectedSeries(entry.seed)
+      setSelectedSeriesAnime(entry.anime)
+      setSeriesData(entry.data)
+      setSeriesError(entry.error)
+      setSeriesLoading(false)
+      setSelectedMovie(null)
+      setMovieData(null)
+      setMovieError(null)
+      setMovieLoading(false)
+      setOpening(null)
+      setView('series')
+      return
+    }
+    if (entry.view === 'search') setSearchReturnView(entry.returnView)
+    clearDetails()
+    setView(entry.view)
+  }
+
   const loadCatalogItem = (item: TmdbCatalogSummary, returnView: DetailReturnView) => {
     const sourceCatalog = catalogForItem(item)
-    if (item.type === 'movie') return void loadMovie(item as TmdbMovieSummary, sourceCatalog, returnView)
-    return void loadSeries(item as TmdbSeriesSummary, sourceCatalog, returnView)
+    const entry: NavigationEntry = item.type === 'movie'
+      ? {
+          view: 'movie',
+          seed: item as TmdbMovieSummary,
+          catalog: sourceCatalog,
+          data: null,
+          error: null,
+          returnView,
+        }
+      : {
+          view: 'series',
+          seed: item as TmdbSeriesSummary,
+          data: null,
+          error: null,
+          anime: sourceCatalog === 'anime' || Boolean(item.is_anime),
+          returnView,
+        }
+    recordNavigation(entry)
+    applyNavigationEntry(entry)
   }
 
   const retryMovie = () => {
@@ -737,10 +814,114 @@ export default function App() {
   }
 
   const navigate = (next: NetWatchView) => {
-    clearDetails()
-    setView(next)
-    setDiagnosticsOpen(false)
+    if (!['home', 'discover', 'search', 'settings'].includes(next)) return
+    const entry: NavigationEntry = next === 'search'
+      ? { view: 'search', returnView: searchReturnView }
+      : { view: next as SimpleNavigationView }
+    if (!recordNavigation(entry)) {
+      setDiagnosticsOpen(false)
+      return
+    }
+    applyNavigationEntry(entry)
   }
+
+  const navigateBack = () => {
+    if (diagnosticsOpen) {
+      setDiagnosticsOpen(false)
+      return true
+    }
+    const target = navigationBack.current.pop()
+    if (target) {
+      navigationForward.current = [...navigationForward.current, captureNavigationEntry()].slice(-NAVIGATION_HISTORY_LIMIT)
+      applyNavigationEntry(target)
+      return true
+    }
+    if (view === 'movie' || view === 'series') {
+      applyNavigationEntry(
+        detailReturnView === 'search'
+          ? { view: 'search', returnView: searchReturnView }
+          : { view: detailReturnView },
+      )
+      return true
+    }
+    if (view === 'search') {
+      applyNavigationEntry({ view: searchReturnView })
+      return true
+    }
+    return false
+  }
+
+  const navigateForward = () => {
+    if (diagnosticsOpen) {
+      setDiagnosticsOpen(false)
+      return true
+    }
+    const target = navigationForward.current.pop()
+    if (!target) return false
+    navigationBack.current = [...navigationBack.current, captureNavigationEntry()].slice(-NAVIGATION_HISTORY_LIMIT)
+    applyNavigationEntry(target)
+    return true
+  }
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && diagnosticsOpen) {
+        event.preventDefault()
+        setDiagnosticsOpen(false)
+        return
+      }
+      if (event.key === 'Escape' && (view === 'movie' || view === 'series' || view === 'search')) {
+        if (navigateBack()) event.preventDefault()
+        return
+      }
+      if (event.altKey && event.key === 'ArrowLeft') {
+        if (navigateBack()) event.preventDefault()
+        return
+      }
+      if (event.altKey && event.key === 'ArrowRight') {
+        if (navigateForward()) event.preventDefault()
+        return
+      }
+
+      const target = event.target as HTMLElement | null
+      const editing = Boolean(
+        target?.isContentEditable ||
+        target?.tagName === 'INPUT' ||
+        target?.tagName === 'TEXTAREA' ||
+        target?.tagName === 'SELECT'
+      )
+      const ctrlK = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k'
+      const slash = event.key === '/' && !event.ctrlKey && !event.metaKey && !event.altKey && !editing
+      if ((ctrlK || slash) && ['home', 'discover', 'settings', 'search'].includes(view)) {
+        event.preventDefault()
+        if (view === 'home') homeSearchRef.current?.focus()
+        else if (view === 'discover') discoverSearchRef.current?.focus()
+        else if (view === 'search') searchPageRef.current?.focus()
+        else {
+          setSearchReturnView('settings')
+          const entry: NavigationEntry = { view: 'search', returnView: 'settings' }
+          recordNavigation(entry)
+          applyNavigationEntry(entry)
+          window.setTimeout(() => searchPageRef.current?.focus(), 0)
+        }
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  })
+
+  useEffect(() => {
+    const handleMouseNavigation = (event: MouseEvent) => {
+      const handled = event.button === 3
+        ? navigateBack()
+        : event.button === 4
+          ? navigateForward()
+          : false
+      if (handled) event.preventDefault()
+    }
+    window.addEventListener('mouseup', handleMouseNavigation)
+    return () => window.removeEventListener('mouseup', handleMouseNavigation)
+  })
 
   const updatePreferences = (patch: Partial<NetWatchUiPreferences>) => {
     const next = { ...preferences, ...patch }
@@ -765,6 +946,8 @@ export default function App() {
     const mainPatch: Partial<Omit<NetWatchAppSettings, 'version'>> = {}
     if (patch.defaultQuality !== undefined) mainPatch.defaultQuality = patch.defaultQuality
     if (patch.onClose !== undefined) mainPatch.onClose = patch.onClose
+    if (patch.startWithWindows !== undefined) mainPatch.startWithWindows = patch.startWithWindows
+    if (patch.startMinimized !== undefined) mainPatch.startMinimized = patch.startMinimized
     if (patch.keepWatchingEnabled !== undefined) mainPatch.keepWatchingEnabled = patch.keepWatchingEnabled
     if (patch.keepWatchingLimit !== undefined) mainPatch.keepWatchingLimit = patch.keepWatchingLimit
     if (patch.flareSolverrEnabled !== undefined) mainPatch.flareSolverrEnabled = patch.flareSolverrEnabled
@@ -788,7 +971,13 @@ export default function App() {
         <TitleBar />
 
         <div className="nw-workspace">
-          <Sidebar view={sidebarView} runtime={runtime} onNavigate={navigate} onRuntimeClick={() => setDiagnosticsOpen(true)} />
+          <Sidebar
+            view={sidebarView}
+            runtime={runtime}
+            runtimeOpen={diagnosticsOpen}
+            onNavigate={navigate}
+            onRuntimeClick={() => setDiagnosticsOpen(current => !current)}
+          />
 
           <main className={`nw-content ${diagnosticsOpen ? 'has-drawer' : ''}`}>
             {view === 'home' ? (
@@ -947,7 +1136,7 @@ export default function App() {
                 catalogLabel={selectedMovieCatalog === 'anime' ? 'Anime' : 'Movie'}
                 onQualityFilter={setQualityFilter}
                 onSortMode={setSortMode}
-                onBack={() => setView(detailReturnView)}
+                onBack={() => { navigateBack() }}
                 onRetry={retryMovie}
                 onPlay={(result, movie) => void playMovieResult(result, movie)}
               />
@@ -963,7 +1152,7 @@ export default function App() {
                 anime={selectedSeriesAnime}
                 onQualityFilter={setQualityFilter}
                 onSortMode={setSortMode}
-                onBack={() => setView(detailReturnView)}
+                onBack={() => { navigateBack() }}
                 onRetry={retrySeries}
                 onPlay={(result, series, episode) => void playEpisodeResult(result, series, episode)}
               />

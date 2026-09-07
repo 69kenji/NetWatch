@@ -24,6 +24,9 @@ contextBridge.exposeInMainWorld('electron', {
     remove: catalogId => ipcRenderer.invoke('keep-watching:remove', catalogId),
     onChanged: (callback) => subscribe('keep-watching:changed', callback),
   },
+  diagnostics: {
+    copy: () => ipcRenderer.invoke('diagnostics:copy'),
+  },
   runtime: {
     getStatus: () => ipcRenderer.invoke('runtime:get-status'),
     retry: () => ipcRenderer.invoke('runtime:retry'),
