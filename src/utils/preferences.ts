@@ -9,6 +9,7 @@ export type NetWatchUiPreferences = {
   keepWatchingLimit: number
   flareSolverrEnabled: boolean
   resourceProfile: 'standard' | 'reduced'
+  homeLayout: 'standard' | 'cinematic'
 }
 
 const DEFAULT_UI_PREFERENCES: NetWatchUiPreferences = {
@@ -20,6 +21,7 @@ const DEFAULT_UI_PREFERENCES: NetWatchUiPreferences = {
   keepWatchingLimit: 5,
   flareSolverrEnabled: false,
   resourceProfile: 'standard',
+  homeLayout: 'standard',
 }
 
 const STORAGE_KEY = 'netwatch-ui-preferences-v1'
@@ -45,6 +47,7 @@ export function loadUiPreferences(): NetWatchUiPreferences {
         : 5,
       flareSolverrEnabled: Boolean(parsed?.flareSolverrEnabled),
       resourceProfile: parsed?.resourceProfile === 'reduced' ? 'reduced' : 'standard',
+      homeLayout: parsed?.homeLayout === 'cinematic' ? 'cinematic' : 'standard',
     }
   } catch {
     return DEFAULT_UI_PREFERENCES

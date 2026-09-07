@@ -2202,3 +2202,179 @@ body, button, input, select, textarea {
   .nw-credential-row__actions { width: 100%; justify-content: flex-start; }
   .nw-credential-editor__footer { align-items: flex-start; flex-direction: column; }
 }
+
+/* ── Home layout controls and cinematic rails ────────────────────────── */
+.nw-home-topbar {
+  background: transparent;
+  backdrop-filter: none;
+  pointer-events: none;
+}
+
+.nw-home-toolbar {
+  width: min(1028px, 100%);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  align-items: center;
+  gap: 12px;
+}
+
+.nw-home-toolbar .nw-searchbar {
+  width: 100%;
+  pointer-events: auto;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+}
+
+.nw-home-layout-toggle {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--r-sm);
+  outline: none;
+  background: rgba(15, 16, 21, 0.94);
+  color: #777480;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24);
+  cursor: pointer;
+  pointer-events: auto;
+  transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast), box-shadow var(--t-fast);
+}
+
+.nw-home-layout-toggle:hover {
+  color: #d9d6df;
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(18, 19, 25, 0.97);
+}
+
+.nw-home-layout-toggle.is-active {
+  color: #a996ff;
+  border-color: rgba(128, 88, 255, 0.34);
+  background: rgba(128, 88, 255, 0.1);
+}
+
+.nw-home-layout-toggle:focus-visible {
+  color: #ebe8f0;
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28), 0 0 0 2px rgba(128, 88, 255, 0.2);
+}
+
+.nw-home-layout-toggle__glyph {
+  width: 17px;
+  height: 14px;
+  display: grid;
+  grid-template-columns: 1.55fr 1fr;
+  gap: 2px;
+}
+
+.nw-home-layout-toggle__glyph i {
+  display: block;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+}
+
+.nw-keep-watching-card {
+  position: relative;
+  min-width: 0;
+  scroll-snap-align: start;
+}
+
+.nw-keep-watching-card > .nw-catalog-card {
+  width: 100%;
+}
+
+.nw-keep-watching-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 6;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  outline: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.8);
+  opacity: 0.78;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.92));
+  cursor: pointer;
+  transition: color var(--t-fast), opacity var(--t-fast), filter var(--t-fast), transform var(--t-fast);
+}
+
+.nw-keep-watching-remove:hover {
+  color: #fff;
+  opacity: 1;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.98));
+  transform: translateY(-1px) scale(1.06);
+}
+
+.nw-keep-watching-remove:focus-visible {
+  color: #fff;
+  opacity: 1;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.98));
+  transform: translateY(-1px) scale(1.04);
+}
+
+.nw-home-feed.is-cinematic .nw-discovery-rail {
+  grid-auto-columns: clamp(300px, 28vw, 440px);
+  gap: 16px;
+}
+
+.nw-discovery-skeleton.is-cinematic,
+.nw-catalog-card.is-cinematic .nw-movie-card__poster {
+  aspect-ratio: 16 / 9;
+}
+
+.nw-catalog-card.is-cinematic {
+  position: relative;
+}
+
+.nw-catalog-card.is-cinematic .nw-movie-card__poster::after {
+  content: '';
+  position: absolute;
+  inset: 36% 0 0;
+  z-index: 1;
+  background: linear-gradient(180deg, transparent, rgba(7, 8, 11, 0.88));
+  pointer-events: none;
+}
+
+.nw-catalog-card.is-cinematic .nw-catalog-card__kind {
+  top: 9px;
+  bottom: auto;
+}
+
+.nw-catalog-card.is-cinematic .nw-movie-card__copy {
+  position: absolute;
+  right: 0;
+  bottom: 3px;
+  left: 0;
+  z-index: 2;
+  padding: 16px 13px 12px;
+  pointer-events: none;
+}
+
+.nw-catalog-card.is-cinematic .nw-movie-card__copy strong {
+  color: #f0edf3;
+  font-size: 14px;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+}
+
+.nw-catalog-card.is-cinematic .nw-movie-card__copy span,
+.nw-catalog-card.is-cinematic .nw-keep-watching-status {
+  color: rgba(232, 228, 237, 0.68);
+  font-size: 9px;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+
+.nw-catalog-card.is-cinematic .nw-keep-watching-progress {
+  z-index: 4;
+}
+
+@media (max-width: 900px) {
+  .nw-home-feed.is-cinematic .nw-discovery-rail {
+    grid-auto-columns: clamp(270px, 47vw, 360px);
+  }
+}

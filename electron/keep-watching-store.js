@@ -148,6 +148,17 @@ class KeepWatchingStore {
     return true
   }
 
+  remove(catalogId) {
+    if (!this.enabled()) return false
+    const normalized = normalizeCatalogId(catalogId)
+    if (!normalized) throw new Error('Keep Watching catalog identifier is invalid')
+    const index = this.records.findIndex(item => item.catalog_id === normalized)
+    if (index < 0) return false
+    this.records.splice(index, 1)
+    this.persist()
+    return true
+  }
+
   applyLimit() {
     if (!this.enabled()) return
     const before = this.records.length

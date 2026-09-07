@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('electron', {
   },
   keepWatching: {
     getState: () => ipcRenderer.invoke('keep-watching:get-state'),
+    remove: catalogId => ipcRenderer.invoke('keep-watching:remove', catalogId),
     onChanged: (callback) => subscribe('keep-watching:changed', callback),
   },
   runtime: {

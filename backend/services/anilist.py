@@ -127,7 +127,7 @@ class AniListService:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "NetWatch/1.1.0",
+            "User-Agent": "NetWatch/1.1.1",
         }
         body = {
             "query": _SEARCH_QUERY,

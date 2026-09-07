@@ -7,6 +7,7 @@ interface CatalogCardProps {
   progress?: number | null
   status?: string | null
   busy?: boolean
+  variant?: 'poster' | 'cinematic'
 }
 
 function kindLabel(item: TmdbCatalogSummary) {
@@ -14,11 +15,20 @@ function kindLabel(item: TmdbCatalogSummary) {
   return item.type === 'movie' ? 'Movie' : 'TV'
 }
 
-export function CatalogCard({ item, onSelect, progress = null, status = null, busy = false }: CatalogCardProps) {
+export function CatalogCard({
+  item,
+  onSelect,
+  progress = null,
+  status = null,
+  busy = false,
+  variant = 'poster',
+}: CatalogCardProps) {
+  const artwork = variant === 'cinematic' ? item.backdrop || item.poster : item.poster
+
   return (
     <motion.button
       type="button"
-      className="nw-movie-card nw-catalog-card"
+      className={`nw-movie-card nw-catalog-card${variant === 'cinematic' ? ' is-cinematic' : ''}`}
       onClick={onSelect}
       disabled={busy}
       whileHover={{ y: -2 }}
@@ -26,8 +36,8 @@ export function CatalogCard({ item, onSelect, progress = null, status = null, bu
       aria-label={`Open ${item.title}${item.year ? ` (${item.year})` : ''}`}
     >
       <div className="nw-movie-card__poster">
-        {item.poster ? (
-          <img src={item.poster} alt="" loading="lazy" />
+        {artwork ? (
+          <img src={artwork} alt="" loading="lazy" />
         ) : (
           <div className="nw-movie-card__poster-fallback" aria-hidden="true">
             <span>NW</span>

@@ -222,6 +222,7 @@ interface Window {
     }
     keepWatching: {
       getState: () => Promise<NetWatchKeepWatchingState>
+      remove: (catalogId: string) => Promise<{ removed: boolean; state: NetWatchKeepWatchingState }>
       onChanged: (callback: (state: NetWatchKeepWatchingState) => void) => () => void
     }
     runtime: {

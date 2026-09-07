@@ -8,9 +8,10 @@ type Props = {
   items: TmdbCatalogSummary[]
   loading?: boolean
   onSelect: (item: TmdbCatalogSummary) => void
+  cinematic?: boolean
 }
 
-export function HomeRail({ title, items, loading = false, onSelect }: Props) {
+export function HomeRail({ title, items, loading = false, onSelect, cinematic = false }: Props) {
   const railRef = useRef<HTMLDivElement>(null)
 
   const scrollByPage = (direction: -1 | 1) => {
@@ -35,11 +36,14 @@ export function HomeRail({ title, items, loading = false, onSelect }: Props) {
 
       <div className="nw-discovery-rail" ref={railRef}>
         {loading
-          ? Array.from({ length: 8 }).map((_, index) => <span className="nw-discovery-skeleton" key={index} />)
+          ? Array.from({ length: 8 }).map((_, index) => (
+              <span className={`nw-discovery-skeleton${cinematic ? ' is-cinematic' : ''}`} key={index} />
+            ))
           : items.map(item => (
               <CatalogCard
                 key={`${item.type}-${item.id}`}
                 item={item}
+                variant={cinematic ? 'cinematic' : 'poster'}
                 onSelect={() => onSelect(item)}
               />
             ))}

@@ -700,6 +700,32 @@ export default function App() {
     }
   }
 
+  const removeKeepWatchingEntry = async (entry: HydratedKeepWatchingItem) => {
+    const api = window.electron?.keepWatching
+    if (!api) {
+      setKeepWatchingError('Keep Watching bridge unavailable. Launch NetWatch through Electron.')
+      return
+    }
+
+    const catalogId = entry.record.catalog_id
+    ++keepWatchingRequestId.current
+    keepWatchingMetadata.current.delete(catalogId)
+    setKeepWatchingItems(current => current.filter(item => item.record.catalog_id !== catalogId))
+    setKeepWatchingError(null)
+
+    try {
+      const result = await api.remove(catalogId)
+      await hydrateKeepWatching(result.state)
+    } catch (error) {
+      setKeepWatchingError(getErrorMessage(error))
+      try {
+        await hydrateKeepWatching(await api.getState())
+      } catch {
+        // Keep the original removal error visible.
+      }
+    }
+  }
+
   const retryStartup = async () => {
     if (!window.electron?.runtime) return
     setRuntime({ ...INITIAL_RUNTIME, message: 'Retrying startup…' })
@@ -728,6 +754,7 @@ export default function App() {
     const localPatch: Partial<NetWatchUiPreferences> = {}
     if (patch.subtitleLanguage !== undefined) localPatch.subtitleLanguage = patch.subtitleLanguage
     if (patch.showStartupDetails !== undefined) localPatch.showStartupDetails = patch.showStartupDetails
+    if (patch.homeLayout !== undefined) localPatch.homeLayout = patch.homeLayout
     if (Object.keys(localPatch).length) {
       setPreferences(current => {
         const localNext = { ...current, ...localPatch }
@@ -753,6 +780,7 @@ export default function App() {
     : (view === 'movie' || view === 'series')
       ? (detailReturnView === 'search' ? searchReturnView : detailReturnView)
       : view
+  const cinematicHome = preferences.homeLayout === 'cinematic'
 
   return (
     <IconoirProvider iconProps={{ strokeWidth: 1.65 }}>
@@ -772,14 +800,26 @@ export default function App() {
                 transition={{ duration: 0.16 }}
               >
                 <header className="nw-catalog-topbar nw-home-topbar">
-                  <SearchBar
-                    query={query}
-                    runtimeReady={runtime.ready}
-                    searching={searching}
-                    inputRef={homeSearchRef}
-                    onQueryChange={setQuery}
-                    onSubmit={runSearch}
-                  />
+                  <div className="nw-home-toolbar">
+                    <SearchBar
+                      query={query}
+                      runtimeReady={runtime.ready}
+                      searching={searching}
+                      inputRef={homeSearchRef}
+                      onQueryChange={setQuery}
+                      onSubmit={runSearch}
+                    />
+                    <button
+                      type="button"
+                      className={`nw-home-layout-toggle${cinematicHome ? ' is-active' : ''}`}
+                      aria-label={cinematicHome ? 'Use standard Home layout' : 'Use cinematic Home layout'}
+                      aria-pressed={cinematicHome}
+                      title={cinematicHome ? 'Standard layout' : 'Cinematic layout'}
+                      onClick={() => updatePreferences({ homeLayout: cinematicHome ? 'standard' : 'cinematic' })}
+                    >
+                      <span className="nw-home-layout-toggle__glyph" aria-hidden="true"><i /><i /></span>
+                    </button>
+                  </div>
                 </header>
 
                 {runtime.phase === 'error' && (
@@ -810,48 +850,56 @@ export default function App() {
                   </div>
                 )}
 
-                <div className="nw-home-feed">
+                <div className={`nw-home-feed${cinematicHome ? ' is-cinematic' : ''}`}>
                   {preferences.keepWatchingEnabled && keepWatchingItems.length > 0 ? (
                     <KeepWatchingRail
                       items={keepWatchingItems}
                       openingCatalogId={keepWatchingOpening}
+                      cinematic={cinematicHome}
                       onSelect={entry => void resumeKeepWatching(entry)}
+                      onRemove={entry => void removeKeepWatchingEntry(entry)}
                     />
                   ) : null}
                   <HomeRail
                     title="Trending Movies"
                     items={home.movies}
                     loading={homeLoading && !homeLoaded}
+                    cinematic={cinematicHome}
                     onSelect={item => loadCatalogItem(item, 'home')}
                   />
                   <HomeRail
                     title="Recent Movies"
                     items={home.recent_movies}
                     loading={homeLoading && !homeLoaded}
+                    cinematic={cinematicHome}
                     onSelect={item => loadCatalogItem(item, 'home')}
                   />
                   <HomeRail
                     title="Trending TV"
                     items={home.tv}
                     loading={homeLoading && !homeLoaded}
+                    cinematic={cinematicHome}
                     onSelect={item => loadCatalogItem(item, 'home')}
                   />
                   <HomeRail
                     title="Recent TV"
                     items={home.recent_tv}
                     loading={homeLoading && !homeLoaded}
+                    cinematic={cinematicHome}
                     onSelect={item => loadCatalogItem(item, 'home')}
                   />
                   <HomeRail
                     title="Trending Anime"
                     items={home.anime}
                     loading={homeLoading && !homeLoaded}
+                    cinematic={cinematicHome}
                     onSelect={item => loadCatalogItem(item, 'home')}
                   />
                   <HomeRail
                     title="Recent Anime"
                     items={home.recent_anime}
                     loading={homeLoading && !homeLoaded}
+                    cinematic={cinematicHome}
                     onSelect={item => loadCatalogItem(item, 'home')}
                   />
                   <p className="nw-tmdb-credit nw-home-credit">Metadata · TMDB</p>

@@ -134,7 +134,7 @@ npm run package:win
 Output:
 
 ```text
-release\NetWatch-Setup-1.1.0.exe
+release\NetWatch-Setup-1.1.1.exe
 ```
 
 See [`packaging/PACKAGING.md`](packaging/PACKAGING.md) for release details.
