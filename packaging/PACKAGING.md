@@ -35,10 +35,10 @@ Then build the NSIS installer:
 npm run package:win
 ```
 
-For 1.1.2:
+For 1.1.3:
 
 ```text
-release\NetWatch-Setup-1.1.2.exe
+release\NetWatch-Setup-1.1.3.exe
 ```
 
 ## Installer behavior
@@ -85,4 +85,3 @@ Packaged state lives in WSL:
 ```
 
 Normal uninstall removes the Windows app but preserves `config/` and `data/`. It does not uninstall Docker Desktop, disable WSL, or unregister the user's Linux distribution.
-
