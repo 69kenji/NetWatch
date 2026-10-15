@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3.0
+## 1.2.0
 
 - Added a local media library with folder browsing, filtering, direct playback, and optional TMDB matches confirmed before saving. Removing a folder never deletes media files.
 - Added episode-to-release scrolling, Skip Intro, and Next Episode. Intro/outro timing uses explicit video chapters or matching metadata when available; streamed next episodes respect the selected quality limit.

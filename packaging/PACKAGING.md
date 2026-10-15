@@ -43,10 +43,10 @@ Then build the NSIS installer:
 npm run package:win
 ```
 
-For 1.3.0:
+For 1.2.0:
 
 ```text
-release\NetWatch-Setup-1.3.0.exe
+release\NetWatch-Setup-1.2.0.exe
 ```
 
 ## Installer behavior
