@@ -56,6 +56,10 @@ Backend and torrent-engine listen on all IPv4 interfaces inside the namespace be
 
 Electron and mpv use the backend at `127.0.0.1:8000`. Loopback prevents network exposure but not access by another process in the same Windows user session. Credential windows use sandboxed renderers with narrow preload and IPC interfaces.
 
+mpv disables references embedded in media, automatic companion-file discovery, script loading, and the external URL resolver. Ordinary embedded chapter labels and explicitly selected subtitles remain available. Linked/ordered chapters that load other files are unsupported. These controls reduce unwanted secondary requests; they are not an OS network sandbox or a guarantee against decoder vulnerabilities.
+
+Desktop and gateway JSON responses are capped at 8 MiB during reads, with deadlines covering the body. Backend provider JSON uses caps of at most 8 MiB; provider error text is capped at 4 KiB. Subtitle downloads are not automatically retried after a failed POST.
+
 ### Installer bootstrap
 
 During prerequisite setup, the installer may use Windows servicing tools and download Docker Desktop from `desktop.docker.com`. The helper verifies Windows Authenticode and a Docker Inc. signer. Normal application traffic still uses the VPN runtime.
@@ -76,6 +80,14 @@ Replacement profiles are staged until restart and must pass the same VPN checks 
 
 VPN relays, trackers, peers, indexers, metadata services, and subtitle providers are untrusted. Their availability and returned data are not guaranteed.
 
+Episode playback can query `api.introdb.app` for TV intro/outro timestamps, `api.aniskip.com` for anime timings, and `api.tiffara.com` for series content guidance. AniSkip receives the MAL installment ID from the existing AniList match, its episode number, and rounded video duration. IntroDB and Tiffara receive validated IMDb IDs and, where needed, episode numbers. No file paths or torrent names are sent. Requests use fixed HTTPS hosts, pinned public DNS answers, no redirects, timeouts, bounded responses, and a capped in-memory cache. Failures hide provider data without preventing playback; explicit video chapters remain usable. The desktop renderer never contacts these providers directly.
+
+## Local media
+
+Local-library scans and unmatched playback do not make metadata or torrent requests. Folders come from the native Windows picker; playback accepts an indexed file ID, rechecks its canonical path, and rejects redirected roots and paths outside the selected folder. Files are never removed by library or torrent cleanup. This is not an OS sandbox: Windows permissions and the safety of the decoder still matter.
+
+TMDB matching is optional and requires confirmation before storing an association. Matching searches use the existing VPN backend. Confirmed catalog IDs may later be used for episode metadata. Local subtitle searches are opt-in and send the title and filename through the same backend. The local index is not published through the Android gateway.
+
 ## DNS, IPv6, and host VPNs
 
 Setup writes the checked WireGuard resolver to `~/.local/share/netwatch/config/resolv.conf`. Services in the shared namespace use that resolver. There is no configured fallback to Windows DNS, Docker's embedded resolver, or a public resolver outside the tunnel. IPv6 stays disabled rather than using a separate protected IPv6 route.
@@ -84,7 +96,7 @@ A Windows host VPN may add another layer but does not replace NetWatch's inner t
 
 ## Verified behavior
 
-Packet capture, socket inspection, route and firewall inspection, and failure testing have confirmed that:
+Earlier runtime tests using packet capture, socket inspection, route and firewall inspection, and failure testing confirmed that:
 
 - Windows NetWatch and mpv use local services instead of direct provider or torrent connections;
 - final Internet destinations appear on `wg0`;
@@ -94,6 +106,8 @@ Packet capture, socket inspection, route and firewall inspection, and failure te
 - losing `wg0`, the VPN container, or VPN DNS stops connectivity instead of enabling fallback egress.
 
 `docker/verify-networking.py` checks the expected runtime structure. Repeat packet capture after network changes.
+
+A separate loopback test reproduced secondary playlist requests from Windows mpv and confirmed that disabling references blocks that fixture. Earlier routing tests did not establish safety for every malicious media format.
 
 ## Limits
 

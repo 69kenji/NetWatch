@@ -77,9 +77,3 @@ class ReleaseReferenceStore:
             return
         with cls._lock:
             cls._entries.pop(key, None)
-
-    @classmethod
-    def clear(cls) -> None:
-        """Test/support hook; never returns stored provider URLs."""
-        with cls._lock:
-            cls._entries.clear()

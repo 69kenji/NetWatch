@@ -27,6 +27,29 @@ _MAX_CACHE_ENTRIES = 256
 _MAX_ALIASES = 12
 
 
+def absolute_episode_number(series: dict, season: int, episode: int) -> int | None:
+    if season <= 0 or episode <= 0:
+        return None
+    seasons = series.get("seasons")
+    if not isinstance(seasons, list):
+        return None
+    counts: dict[int, int] = {}
+    for item in seasons:
+        if not isinstance(item, dict):
+            continue
+        number = item.get("season_number")
+        count = item.get("episode_count")
+        if isinstance(number, bool) or not isinstance(number, int):
+            continue
+        if 0 < number <= season and isinstance(count, int) and not isinstance(count, bool) and 0 < count <= 2000:
+            counts[number] = count
+    if any(number not in counts for number in range(1, season + 1)) or episode > counts[season]:
+        return None
+    prior = sum(counts[number] for number in range(1, season))
+    absolute = prior + episode
+    return absolute if 0 < absolute <= 9999 else None
+
+
 def _normalized_title(value: str) -> str:
     text = unicodedata.normalize("NFKD", str(value or "").casefold())
     text = "".join(char for char in text if not unicodedata.combining(char))
@@ -329,7 +352,10 @@ class AnimeIdentityResolver:
         key = cls._key(series, season, episode)
         async with cls._cache_lock:
             cached = cls._load_cache().get(key)
-            if cached and float(cached.get("expires_at") or 0) > time.time():
+            # Refresh old positive entries once to include the installment's MAL ID.
+            if (cached and float(cached.get("expires_at") or 0) > time.time()
+                    and (cached.get("result", {}).get("confidence") != "high"
+                         or "mal_id" in cached.get("result", {}))):
                 result = dict(cached.get("result") or {})
                 result["status"] = "ANILIST_CACHE_HIT"
                 return result
@@ -519,6 +545,8 @@ class AnimeIdentityResolver:
             aliases=_aliases(selected),
             installment_episode=selected_episode,
             anilist_id=selected["id"],
+            mal_id=selected.get("idMal"),
+            installment_episode_count=selected.get("episodes"),
             anilist_year=(selected_start.year if selected_start else None),
             evidence="exact title anchor plus mainline date/episode evidence",
         )

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Check, RefreshCircle, WarningTriangle } from 'iconoir-react'
 import type { NetWatchUiPreferences } from '../utils/preferences'
+import { PlaybackSettings } from './PlaybackSettings'
 
 type Props = {
   preferences: NetWatchUiPreferences
@@ -298,6 +299,7 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
       </header>
 
       <div className="nw-settings-grid">
+        <PlaybackSettings preferences={preferences} onChange={update} />
         <section className="nw-settings-card nw-settings-card--compact">
           <div className="nw-settings-card__copy">
             <strong>Default quality</strong>
@@ -311,6 +313,21 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
             <option value="2160p">2160p</option>
             <option value="1080p">1080p</option>
             <option value="720p">720p</option>
+          </select>
+        </section>
+
+        <section className="nw-settings-card nw-settings-card--compact">
+          <div className="nw-settings-card__copy">
+            <strong>Always skip intro</strong>
+          </div>
+          <select
+            className="nw-settings-select"
+            aria-label="Always skip intro"
+            value={preferences.alwaysSkipIntro ? 'enabled' : 'disabled'}
+            onChange={event => update({ alwaysSkipIntro: event.target.value === 'enabled' })}
+          >
+            <option value="disabled">Off</option>
+            <option value="enabled">On</option>
           </select>
         </section>
 

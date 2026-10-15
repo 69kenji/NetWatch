@@ -8,6 +8,7 @@ import aiohttp
 
 from config import settings
 from services.exceptions import DependencyUnavailableError
+from services.net_safety import read_json_limited
 
 
 class RangeRequestSupersededError(RuntimeError):
@@ -16,6 +17,13 @@ class RangeRequestSupersededError(RuntimeError):
 
 class RangeRequestCancelledError(RuntimeError):
     pass
+
+
+class TorrentAdmissionError(RuntimeError):
+    def __init__(self, status: int):
+        self.status = status
+        super().__init__("This release is already playing in another session" if status == 409
+                         else "Torrent capacity reached; close another playback session and retry")
 
 
 class TorrentEngineService:
@@ -45,9 +53,12 @@ class TorrentEngineService:
         payload=None,
         timeout: Optional[float] = None,
         allow_404: bool = False,
+        owner_token: Optional[str] = None,
     ):
         session = await cls._ensure_session()
         request_kwargs = {"json": payload}
+        if owner_token is not None:
+            request_kwargs["headers"] = {"X-NetWatch-Owner": owner_token}
         if timeout is not None:
             request_kwargs["timeout"] = aiohttp.ClientTimeout(total=timeout)
 
@@ -59,8 +70,10 @@ class TorrentEngineService:
             ) as response:
                 if response.status == 404 and allow_404:
                     return None
-                data = await response.json(content_type=None)
+                data = await read_json_limited(response)
                 if not 200 <= response.status < 300:
+                    if response.status in (409, 429):
+                        raise TorrentAdmissionError(response.status)
                     detail = data.get("detail") if isinstance(data, dict) else None
                     raise DependencyUnavailableError(
                         "torrent-engine",
@@ -69,7 +82,7 @@ class TorrentEngineService:
                 return data
         except DependencyUnavailableError:
             raise
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             raise DependencyUnavailableError("torrent-engine", str(exc)) from exc
 
     @classmethod
@@ -82,12 +95,14 @@ class TorrentEngineService:
         source_url: str,
         media_name: str,
         expected_hash: Optional[str] = None,
+        owner_token: Optional[str] = None,
     ):
         return await cls._json(
             "POST",
             "/torrents/add",
             payload={
                 "source": source_url,
+                "owner_token": owner_token,
                 "expected_hash": expected_hash,
                 "media_name": media_name,
             },
@@ -99,6 +114,7 @@ class TorrentEngineService:
         torrent_bytes: bytes,
         media_name: str,
         expected_hash: Optional[str] = None,
+        owner_token: Optional[str] = None,
     ):
         # The libtorrent service derives the canonical v1/v2 hash from the
         # parsed .torrent itself. That avoids incorrectly treating a v2-only
@@ -108,6 +124,7 @@ class TorrentEngineService:
             "/torrents/add",
             payload={
                 "torrent_b64": base64.b64encode(torrent_bytes).decode("ascii"),
+                "owner_token": owner_token,
                 "expected_hash": expected_hash,
                 "media_name": media_name,
             },
@@ -182,6 +199,8 @@ class TorrentEngineService:
         timeout_seconds: float = 240.0,
         poll_interval: float = 0.2,
         request_generation: Optional[int] = None,
+        probe: bool = False,
+        allow_partial: bool = False,
     ):
         del poll_interval  # Polling lives inside the engine to avoid HTTP chatter.
         index = video_file.get("index")
@@ -198,6 +217,8 @@ class TorrentEngineService:
                     "schedule": True,
                     "timeout_seconds": float(timeout_seconds),
                     "request_generation": request_generation,
+                    "probe": probe,
+                    "allow_partial": allow_partial,
                 },
                 timeout=float(timeout_seconds) + 10.0,
             )
@@ -231,12 +252,14 @@ class TorrentEngineService:
         info_hash: str,
         delete_files: bool = True,
         verify: bool = True,
+        owner_token: Optional[str] = None,
     ) -> bool:
         del verify  # Engine DELETE always performs its own verification.
         data = await cls._json(
             "DELETE",
             f"/torrents/{info_hash.lower()}?delete_files={str(bool(delete_files)).lower()}",
             allow_404=True,
+            owner_token=owner_token,
         )
         return True if data is None else bool(data.get("verified_absent"))
 

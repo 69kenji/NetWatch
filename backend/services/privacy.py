@@ -9,6 +9,7 @@ import aiohttp
 
 from config import settings
 from services.exceptions import DependencyUnavailableError
+from services.net_safety import read_response_limited
 
 # Literal IP endpoints keep the public-IP check independent from DNS. Cloudflare
 # serves /cdn-cgi/trace on its 1.1.1.1 service, and the response includes ip=<client>.
@@ -42,7 +43,7 @@ class PrivacyService:
         errors: list[str] = []
         async with aiohttp.ClientSession(
             timeout=timeout,
-            headers={"Accept": "text/plain", "User-Agent": "NetWatch/0.1"},
+            headers={"Accept": "text/plain", "User-Agent": "NetWatch"},
         ) as session:
             for url in PUBLIC_IP_TRACE_URLS:
                 try:
@@ -50,7 +51,7 @@ class PrivacyService:
                         if response.status != 200:
                             errors.append(f"{url}: HTTP {response.status}")
                             continue
-                        raw_ip = cls._trace_ip(await response.text())
+                        raw_ip = cls._trace_ip((await read_response_limited(response, 4096)).decode('utf-8', errors='replace'))
                         parsed = ipaddress.ip_address(raw_ip)
                         if parsed.version != 4:
                             errors.append(f"{url}: returned non-IPv4 address")

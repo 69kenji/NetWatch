@@ -11,6 +11,8 @@ import { NetworkPanel } from './NetworkPanel'
 import { VolumeSlider } from './VolumeSlider'
 import { ProgressBar } from './ProgressBar'
 import { BufferingOverlay } from './BufferingOverlay'
+import { EpisodeExtras } from './EpisodeExtras'
+import { PlaybackControls } from './PlaybackControls'
 
 
 function SkipTenIcon({ direction, width = 24, height = 24 }: { direction: 'back' | 'forward'; width?: number; height?: number }) {
@@ -212,12 +214,13 @@ export function Player() {
     nativeState.voConfigured &&
     Number.isFinite(nativeState.duration) &&
     nativeState.duration > 0 &&
-    (nativeState.status === 'playing' || nativeState.status === 'paused')
+    (nativeState.status === 'playing' || nativeState.status === 'paused' || nativeState.status === 'ended' || nativeState.eofReached)
   )
   const waitingForVideo = Boolean(
     !preparing &&
     preparation?.stage === 'ready' &&
     session?.source &&
+    !nativeState?.eofReached && nativeState?.status !== 'ended' && nativeState?.status !== 'error' &&
     !videoReady
   )
   const seekRestartBuffering = Boolean(
@@ -230,6 +233,7 @@ export function Player() {
     !preparing &&
     !waitingForVideo &&
     preparation?.stage === 'ready' &&
+    !nativeState?.eofReached && nativeState?.status !== 'ended' &&
     (nativeState?.pausedForCache || seekRestartBuffering)
   )
   const bufferOverlayActive = preparing || waitingForVideo || rebuffering
@@ -468,6 +472,10 @@ export function Player() {
         onMouseEnter={showPointerAndControls}
       >
         <div className="player-video-area" onClick={togglePlay}>
+          {session && (session.mediaItem?.type === 'tv' || session.localEpisode) && <EpisodeExtras
+            key={session.openedAt} session={session} state={nativeState}
+            blocked={bufferOverlayActive || hasError} menusOpen={menuOpen}
+          />}
           <div className="player-title-bar">
             <AnimatePresence>
               {topBarVisible && (
@@ -601,6 +609,7 @@ export function Player() {
                 </div>
 
                 <div className="player-controls-right">
+                  <PlaybackControls key={session?.openedAt} onError={showFeedback} />
                   <button
                     className={`btn btn-ghost btn-icon ${tracksPanelOpen ? 'active' : ''}`}
                     onClick={() => {
@@ -612,7 +621,7 @@ export function Player() {
                   >
                     <ClosedCaptionsTag width={21} height={21} />
                   </button>
-                  <button
+                  {!session?.localFileId && <button
                     className={`btn btn-ghost btn-icon ${networkPanelOpen ? 'active' : ''}`}
                     onClick={() => {
                       setTracksPanelOpen(false)
@@ -622,7 +631,7 @@ export function Player() {
                     aria-label="Network status"
                   >
                     <Download width={20} height={20} />
-                  </button>
+                  </button>}
                 </div>
               </div>
             </motion.div>
@@ -649,6 +658,8 @@ export function Player() {
         <AnimatePresence>
           {tracksPanelOpen && !bufferOverlayActive && !hasError && (
             <TracksPanel
+              key={session?.openedAt}
+              localPlayback={Boolean(session?.localFileId)}
               mediaItem={player.mediaItem}
               mediaTitle={title}
               filePath={player.filePath || session?.filePath}

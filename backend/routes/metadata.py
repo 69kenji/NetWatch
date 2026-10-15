@@ -3,10 +3,11 @@ import unicodedata
 
 from fastapi import APIRouter, HTTPException, Path as ApiPath, Query, Response
 
-from services.anime_identity import AnimeIdentityResolver
+from services.anime_identity import AnimeIdentityResolver, absolute_episode_number as _absolute_episode_number
 from services.exceptions import DependencyUnavailableError
 from services.metadata import MetadataService
 from services.release_search import ReleaseSearchService
+from services.episode_playback import playback_info, next_episode
 
 router = APIRouter()
 
@@ -134,29 +135,6 @@ def _media_aliases(item: dict, *, include_short: bool = True) -> list[str]:
         if shortened and shortened.casefold() not in {alias.casefold() for alias in aliases}:
             aliases.append(shortened)
     return aliases[:8]
-
-
-def _absolute_episode_number(series: dict, season: int, episode: int) -> int | None:
-    if season <= 0 or episode <= 0:
-        return None
-    seasons = series.get("seasons")
-    if not isinstance(seasons, list):
-        return None
-    counts: dict[int, int] = {}
-    for item in seasons:
-        if not isinstance(item, dict):
-            continue
-        number = item.get("season_number")
-        count = item.get("episode_count")
-        if isinstance(number, bool) or not isinstance(number, int):
-            continue
-        if 0 < number <= season and isinstance(count, int) and not isinstance(count, bool) and 0 < count <= 2000:
-            counts[number] = count
-    if any(number not in counts for number in range(1, season + 1)) or episode > counts[season]:
-        return None
-    prior = sum(counts[number] for number in range(1, season))
-    absolute = prior + episode
-    return absolute if 0 < absolute <= 9999 else None
 
 
 def _identity_prefix_matches(prefix: str, aliases: list[str], year: str | None) -> bool:
@@ -841,6 +819,35 @@ async def series_season(
 ):
     try:
         return await MetadataService.get_season(tmdb_id, season_number)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except DependencyUnavailableError as exc:
+        raise dependency_503(exc) from exc
+
+
+@router.get("/series/{tmdb_id}/episodes/{season_number}/{episode_number}/playback-info")
+async def episode_playback_info(
+    tmdb_id: int = ApiPath(..., ge=1, le=2147483647),
+    season_number: int = ApiPath(..., ge=0, le=9999),
+    episode_number: int = ApiPath(..., ge=1, le=9999),
+    duration: float = Query(0, ge=0, le=14400, allow_inf_nan=False),
+):
+    try:
+        return await playback_info(tmdb_id, season_number, episode_number, duration)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except DependencyUnavailableError as exc:
+        raise dependency_503(exc) from exc
+
+
+@router.get("/series/{tmdb_id}/episodes/{season_number}/{episode_number}/next-episode")
+async def episode_successor(
+    tmdb_id: int = ApiPath(..., ge=1, le=2147483647),
+    season_number: int = ApiPath(..., ge=0, le=9999),
+    episode_number: int = ApiPath(..., ge=1, le=9999),
+):
+    try:
+        return {"episode": await next_episode(tmdb_id, season_number, episode_number)}
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
     except DependencyUnavailableError as exc:

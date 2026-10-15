@@ -1,6 +1,8 @@
 import type { QualityFilter } from '../types/torrents'
+import { PLAYBACK_DEFAULTS, normalizePlaybackPreferences } from '../../shared/playback-preferences.mjs'
+import type { PlaybackPreferences } from '../types/playback'
 
-export type NetWatchUiPreferences = {
+export type NetWatchUiPreferences = PlaybackPreferences & {
   defaultQuality: QualityFilter
   subtitleLanguage: string
   showStartupDetails: boolean
@@ -12,9 +14,11 @@ export type NetWatchUiPreferences = {
   flareSolverrEnabled: boolean
   resourceProfile: 'standard' | 'reduced'
   homeLayout: 'standard' | 'cinematic'
+  alwaysSkipIntro: boolean
 }
 
 const DEFAULT_UI_PREFERENCES: NetWatchUiPreferences = {
+  ...PLAYBACK_DEFAULTS,
   defaultQuality: 'all',
   subtitleLanguage: 'en',
   showStartupDetails: false,
@@ -26,6 +30,7 @@ const DEFAULT_UI_PREFERENCES: NetWatchUiPreferences = {
   flareSolverrEnabled: false,
   resourceProfile: 'standard',
   homeLayout: 'standard',
+  alwaysSkipIntro: false,
 }
 
 const STORAGE_KEY = 'netwatch-ui-preferences-v1'
@@ -37,6 +42,7 @@ export function loadUiPreferences(): NetWatchUiPreferences {
     if (!raw) return DEFAULT_UI_PREFERENCES
     const parsed = JSON.parse(raw)
     return {
+      ...normalizePlaybackPreferences(parsed),
       defaultQuality: ['all', '2160p', '1080p', '720p'].includes(parsed?.defaultQuality)
         ? parsed.defaultQuality
         : DEFAULT_UI_PREFERENCES.defaultQuality,
@@ -54,6 +60,7 @@ export function loadUiPreferences(): NetWatchUiPreferences {
       flareSolverrEnabled: Boolean(parsed?.flareSolverrEnabled),
       resourceProfile: parsed?.resourceProfile === 'reduced' ? 'reduced' : 'standard',
       homeLayout: parsed?.homeLayout === 'cinematic' ? 'cinematic' : 'standard',
+      alwaysSkipIntro: parsed?.alwaysSkipIntro === true,
     }
   } catch {
     return DEFAULT_UI_PREFERENCES

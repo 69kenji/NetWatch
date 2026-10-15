@@ -3,7 +3,7 @@ const https = require('https')
 
 const { BackendClient, BackendError } = require('./backend-client')
 const { DeviceStore } = require('./state-store')
-const { selectAutomaticRelease } = require('./quality-policy')
+const { selectAutomaticRelease } = require('../shared/quality-policy.mjs')
 const {
   assertSafeResponse,
   isPrivateIpv4,
@@ -108,6 +108,7 @@ function mapBackendError(error) {
   if (!(error instanceof BackendError)) return error
   if (error.status === 404) return new RemoteError('NOT_FOUND', 404, 'Requested resource was not found')
   if (error.status === 410) return new RemoteError('RELEASE_EXPIRED', 410, 'Release reference expired; refresh stream options')
+  if (error.status === 409) return new RemoteError('SOURCE_IN_USE', 409, 'This release is already playing in another session')
   if (error.status === 429) return new RemoteError('RATE_LIMITED', 429, 'The protected runtime is rate limited')
   if (error.status === 504) return new RemoteError('RUNTIME_NOT_READY', 503, 'The protected runtime did not respond in time')
   return new RemoteError('RUNTIME_NOT_READY', 503, 'The protected NetWatch runtime is unavailable')
@@ -151,6 +152,9 @@ class RemoteGateway {
     this.activeStreams = new Map()
     this.activeTorrentStreams = new Map()
     this.activeConnections = new Map()
+    this.pendingPlayback = new Set()
+    this.torrentMutation = Promise.resolve()
+    this.stopping = false
     this.limiter = new SlidingWindowLimiter()
     this.cleanupTimer = null
     this.server = https.createServer({
@@ -184,6 +188,8 @@ class RemoteGateway {
   }
 
   async stop() {
+    this.stopping = true
+    for (const operation of this.pendingPlayback) operation.cancelled = true
     if (this.cleanupTimer) clearInterval(this.cleanupTimer)
     this.cleanupTimer = null
     this.pairing = null
@@ -191,6 +197,7 @@ class RemoteGateway {
       for (const connection of connections) connection.response.destroy()
     }
     await Promise.allSettled([...this.sessions.keys()].map(id => this.closeSession(id, null, { force: true })))
+    await this.torrentMutation
     this.latestProgressSession.clear()
     if (this.server.listening) {
       await new Promise(resolve => this.server.close(() => resolve()))
@@ -260,6 +267,9 @@ class RemoteGateway {
   }
 
   terminateDevice(deviceId) {
+    for (const operation of this.pendingPlayback) {
+      if (operation.deviceId === deviceId) operation.cancelled = true
+    }
     const connections = this.activeConnections.get(deviceId) || new Set()
     for (const connection of connections) connection.response.destroy()
     this.activeConnections.delete(deviceId)
@@ -425,13 +435,17 @@ class RemoteGateway {
     this.rateLimit(`pair-ip:${peer}`, 8, 10 * 60_000)
     const pairing = this.pairing
     if (!pairing || pairing.expiresAt <= Date.now()) throw new RemoteError('PAIRING_EXPIRED', 410, 'Pairing is not active')
+    const body = await jsonBody(request)
+    // Body reads yield: cancellation, expiry, replacement or another claim may win.
+    if (this.pairing !== pairing || pairing.expiresAt <= Date.now() || request.aborted || response.destroyed) {
+      throw new RemoteError('PAIRING_EXPIRED', 410, 'Pairing is not active')
+    }
     const sourceAttempts = pairing.sourceAttempts.get(peer) || 0
     if (pairing.attempts >= 8 || sourceAttempts >= 5) {
       this.pairing = null
       this.emitStatus()
       throw new RemoteError('PAIRING_LOCKED', 429, 'Pairing was locked after repeated failures', 300)
     }
-    const body = await jsonBody(request)
     const secret = String(body.pairing_secret || '')
     if (!timingSafeTextEqual(secret, pairing.secret)) {
       pairing.attempts += 1
@@ -454,8 +468,9 @@ class RemoteGateway {
       last_seen: now,
       revoked: false,
     }
-    this.deviceStore.add(device)
+    // No await between the final checks and consumption of this one-time secret.
     this.pairing = null
+    this.deviceStore.add(device)
     this.emitStatus()
     this.sendJson(response, 201, {
       device_id: device.id,
@@ -548,7 +563,49 @@ class RemoteGateway {
     return session
   }
 
-  async createPlaybackSession(device, { releaseRef, mediaName, historyTitle, catalog, season = null, episode = null }) {
+  withTorrentMutation(callback) {
+    // Serialize add/register/delete so a late cancelled add cannot delete a
+    // torrent another gateway request is acquiring at the same time.
+    const task = this.torrentMutation.then(callback)
+    this.torrentMutation = task.catch(() => {})
+    return task
+  }
+
+  async createPlaybackSession(device, payload, response) {
+    const operation = { deviceId: device.id, cancelled: false }
+    this.pendingPlayback.add(operation)
+    const assertActive = () => {
+      if (operation.cancelled || device.revoked || this.stopping || response?.destroyed) {
+        throw new RemoteError('PLAYBACK_CANCELLED', 410, 'Playback request was cancelled')
+      }
+    }
+    try {
+      const session = await this.withTorrentMutation(() => this.registerPlaybackSession(device, payload, assertActive))
+      try {
+        assertActive()
+      } catch (error) {
+        await this.closeSession(session.id, device.id, { force: true })
+        throw error
+      }
+      return session
+    } finally {
+      this.pendingPlayback.delete(operation)
+    }
+  }
+
+  async cleanupUnleasedTorrent(infoHash, ownerToken) {
+    if (!/^[0-9a-f]{48}$/u.test(ownerToken || '')) return
+    if (this.torrentLeases.has(infoHash) || !await this.canCleanupTorrent(infoHash)) return
+    if (this.torrentLeases.has(infoHash)) return
+    try {
+      await this.backend.json('DELETE', `/api/torrents/${infoHash}?delete_files=true`, { ownerToken, timeoutMs: 20_000 })
+    } catch (error) {
+      console.warn('[RemoteGateway] Could not clean up remote torrent:', error?.message || error)
+    }
+  }
+
+  async registerPlaybackSession(device, { releaseRef, mediaName, historyTitle, catalog, season = null, episode = null }, assertActive) {
+    assertActive()
     const normalizedHistoryTitle = String(historyTitle || '').trim().slice(0, 240)
     if (!/^[A-Za-z0-9_-]{32,128}$/u.test(releaseRef) || !mediaName || mediaName.length > 240 || !normalizedHistoryTitle) {
       throw new RemoteError('INVALID_INPUT', 422, 'Playback request is invalid')
@@ -559,20 +616,28 @@ class RemoteGateway {
     if (catalog.kind === 'tv' && (season === null || episode === null)) {
       throw new RemoteError('INVALID_INPUT', 422, 'Episode playback requires season and episode')
     }
+    const ownerToken = crypto.randomBytes(24).toString('hex')
     const added = await this.backendInternalJson('POST', '/api/torrents/add', {
-      body: { release_ref: releaseRef, media_name: mediaName },
+      body: { release_ref: releaseRef, media_name: mediaName, owner_token: ownerToken },
       timeoutMs: 45_000,
     })
     const internalHash = String(added.hash || '').toLowerCase()
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(internalHash)) {
       throw new RemoteError('PLAYBACK_NOT_READY', 503, 'Torrent engine returned an invalid session')
     }
+    try {
+      assertActive()
+    } catch (error) {
+      await this.cleanupUnleasedTorrent(internalHash, ownerToken)
+      throw error
+    }
     const sessionId = crypto.randomBytes(24).toString('base64url')
     const session = {
       id: sessionId,
       deviceId: device.id,
       infoHash: internalHash,
-      ownsTorrent: !added.already_existed,
+      ownsTorrent: true,
+      ownerToken,
       catalogId: `${catalog.kind}:${catalog.id}`,
       mediaName,
       historyTitle: normalizedHistoryTitle,
@@ -583,10 +648,11 @@ class RemoteGateway {
       lastActivity: Date.now(),
       subtitleOptionRefs: new Map(),
       subtitleRefs: new Map(),
+      streams: new Set(),
     }
     this.sessions.set(sessionId, session)
     this.latestProgressSession.set(`${device.id}:${session.catalogId}`, sessionId)
-    const lease = this.torrentLeases.get(internalHash) || { count: 0, owned: false }
+    const lease = this.torrentLeases.get(internalHash) || { count: 0, owned: false, ownerToken }
     lease.count += 1
     lease.owned ||= session.ownsTorrent
     this.torrentLeases.set(internalHash, lease)
@@ -654,7 +720,7 @@ class RemoteGateway {
       catalog,
       season,
       episode,
-    })
+    }, response)
     const code = catalog.kind === 'tv'
       ? ` · S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
       : ''
@@ -689,7 +755,7 @@ class RemoteGateway {
         catalog,
         season,
         episode,
-      })
+      }, response)
       this.sendJson(response, 201, { session_id: session.id, state: 'buffering', catalog_id: session.catalogId })
       return
     }
@@ -869,17 +935,26 @@ class RemoteGateway {
     this.activeStreams.set(device.id, perDevice + 1)
     this.activeTorrentStreams.set(session.infoHash, torrentStreams + 1)
     session.lastActivity = Date.now()
-    this.backend.stream(session.infoHash, request, response, {
-      onClosed: () => {
-        const remaining = Math.max(0, (this.activeStreams.get(device.id) || 1) - 1)
-        if (remaining) this.activeStreams.set(device.id, remaining)
-        else this.activeStreams.delete(device.id)
-        const torrentRemaining = Math.max(0, (this.activeTorrentStreams.get(session.infoHash) || 1) - 1)
-        if (torrentRemaining) this.activeTorrentStreams.set(session.infoHash, torrentRemaining)
-        else this.activeTorrentStreams.delete(session.infoHash)
-        session.lastActivity = Date.now()
-      },
-    })
+    session.streams.add(response)
+    let closed = false
+    const onClosed = () => {
+      if (closed) return
+      closed = true
+      session.streams.delete(response)
+      const remaining = Math.max(0, (this.activeStreams.get(device.id) || 1) - 1)
+      if (remaining) this.activeStreams.set(device.id, remaining)
+      else this.activeStreams.delete(device.id)
+      const torrentRemaining = Math.max(0, (this.activeTorrentStreams.get(session.infoHash) || 1) - 1)
+      if (torrentRemaining) this.activeTorrentStreams.set(session.infoHash, torrentRemaining)
+      else this.activeTorrentStreams.delete(session.infoHash)
+      session.lastActivity = Date.now()
+    }
+    try {
+      this.backend.stream(session.infoHash, request, response, { onClosed })
+    } catch (error) {
+      onClosed()
+      throw error
+    }
   }
 
   async pipeBackendAsset(request, response, backendPath) {
@@ -901,20 +976,20 @@ class RemoteGateway {
     const session = this.sessions.get(sessionId)
     if (!session || (!force && session.deviceId !== deviceId)) return false
     this.sessions.delete(sessionId)
-    const lease = this.torrentLeases.get(session.infoHash)
-    if (lease) {
-      lease.count = Math.max(0, lease.count - 1)
-      if (!lease.count) {
-        this.torrentLeases.delete(session.infoHash)
-        if (lease.owned && await this.canCleanupTorrent(session.infoHash)) {
-          try {
-            await this.backend.json('DELETE', `/api/torrents/${session.infoHash}?delete_files=true`, { timeoutMs: 20_000 })
-          } catch (error) {
-            console.warn('[RemoteGateway] Could not clean up remote torrent:', error?.message || error)
-          }
+    const progressKey = `${session.deviceId}:${session.catalogId}`
+    if (this.latestProgressSession.get(progressKey) === sessionId) this.latestProgressSession.delete(progressKey)
+    for (const response of session.streams) response.destroy()
+    session.streams.clear()
+    await this.withTorrentMutation(async () => {
+      const lease = this.torrentLeases.get(session.infoHash)
+      if (lease) {
+        lease.count = Math.max(0, lease.count - 1)
+        if (!lease.count) {
+          this.torrentLeases.delete(session.infoHash)
+          if (lease.owned) await this.cleanupUnleasedTorrent(session.infoHash, lease.ownerToken)
         }
       }
-    }
+    })
     for (const token of session.subtitleRefs.values()) {
       try {
         await this.backend.json('DELETE', `/api/subtitles/file/${token}`, { timeoutMs: 5_000 })

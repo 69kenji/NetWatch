@@ -8,6 +8,11 @@ const { composeRuntimeEnvironment } = require('./resource-profile')
 const { normalizeVpnProfileType, wireGuardFileTimestamps } = require('./vpn-profile')
 const { cleanWslOutput, runProcess, sleep } = require('./process-utils')
 
+function isStaleResolverMount(error) {
+  const message = error instanceof Error ? error.message : String(error)
+  return /error mounting "\/run\/desktop\/mnt\/host\/wsl\/docker-desktop-bind-mounts\/[^"\r\n]+" to rootfs at "\/etc\/resolv\.conf":[^\r\n]*no such file or directory/iu.test(message)
+}
+
 function createWslRuntime({ appSettings, backendJson, getRuntimeStatus, setRuntimeStatus }) {
   if (!appSettings || typeof backendJson !== 'function' || typeof getRuntimeStatus !== 'function' || typeof setRuntimeStatus !== 'function') {
     throw new Error('WSL runtime dependencies are invalid')
@@ -473,6 +478,40 @@ function createWslRuntime({ appSettings, backendJson, getRuntimeStatus, setRunti
     }
   }
   
+  async function recreateResolverClients() {
+    const resolver = app.isPackaged
+      ? `${packagedRuntimeContext.configDir}/resolv.conf`
+      : 'docker/torrent-engine/resolv.conf'
+    // Do not hide a missing/unsafe source file by asking Compose to create it.
+    await runWsl(['test', '-f', resolver], 5000)
+    await runWsl(['test', '!', '-L', resolver], 5000)
+    await runWsl(['test', '-r', resolver], 5000)
+    setRuntimeStatus({
+      phase: 'services',
+      ready: false,
+      message: 'Repairing private DNS mounts…',
+      services: { stack: 'starting', backend: 'starting', torrentEngine: 'starting', prowlarr: 'starting' },
+    })
+    // Keep the healthy VPN namespace and all volumes. Recreate only clients
+    // that bind this resolver; --no-deps prevents recreating their VPN owner.
+    const repairArgs = ['up', '-d', '--force-recreate', '--no-deps']
+    if (app.isPackaged && packagedRuntimeUpdated) repairArgs.push('--build')
+    repairArgs.push('torrent-engine', 'prowlarr')
+    if (appSettings.get().flareSolverrEnabled) repairArgs.push('flaresolverr')
+    repairArgs.push('backend')
+    await runWsl(composeCommandArgs(...repairArgs), app.isPackaged && packagedRuntimeUpdated ? 600_000 : 180_000)
+    // Compose has started the containers, but their APIs may not be listening
+    // yet. The isolation verifier also checks backend-to-engine connectivity.
+    const clients = ['nw_backend', 'nw_torrent_engine']
+    const health = await Promise.all(clients.map(name => waitForContainerHealthy(name, 90_000)))
+    for (let index = 0; index < clients.length; index++) {
+      if (!health[index].healthy) {
+        throw new Error(`${clients[index]} did not become healthy after DNS mount recovery (status: ${health[index].status}).`)
+      }
+    }
+    await verifyVpnIsolation()
+  }
+
   async function startComposeWithVpnSelfHeal() {
     let recovered = false
     const upArgs = ['up', '-d']
@@ -500,7 +539,11 @@ function createWslRuntime({ appSettings, backendJson, getRuntimeStatus, setRunti
       await runWsl(composeArgs, composeTimeoutMs)
     } catch (error) {
       const failedHealth = await containerHealth('nw_vpn')
-      if (!recovered && failedHealth !== 'healthy') {
+      if (failedHealth === 'healthy' && isStaleResolverMount(error)) {
+        // One attempt only. A failed repair propagates to the startup error UI.
+        await recreateResolverClients()
+        recovered = true
+      } else if (!recovered && failedHealth !== 'healthy') {
         await recreateVpnNamespace(`Compose startup failed while nw_vpn was ${failedHealth}`)
         recovered = true
         // The first Compose run may have stopped at torrent-engine's VPN health

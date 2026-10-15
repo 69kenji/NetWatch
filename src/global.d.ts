@@ -26,6 +26,7 @@ interface NativePlayerState {
   subtitleTrack: number | string | null
   subtitleDelay: number
   tracks: NativePlayerTrack[]
+  chapters?: { time: number; title: string }[]
   cacheDuration: number
   cacheBufferingState: number
   pausedForCache: boolean
@@ -70,6 +71,8 @@ interface NativePlayerPreparationState {
 }
 
 interface NativePlayerSession {
+  localFileId?: string | null
+  localEpisode?: boolean
   source: string | null
   title: string | null
   infoHash: string | null
@@ -80,7 +83,8 @@ interface NativePlayerSession {
   openedAt: string
 }
 
-interface NetWatchAppSettings {
+type NetWatchAppSettings = import('./types/playback').PlaybackPreferences & {
+  alwaysSkipIntro: boolean
   version: number
   onClose: 'minimize-to-tray' | 'exit'
   startWithWindows: boolean
@@ -90,6 +94,8 @@ interface NetWatchAppSettings {
   defaultQuality: import('./types/torrents').QualityFilter
   flareSolverrEnabled: boolean
   resourceProfile: 'standard' | 'reduced'
+  playbackVolume: number
+  playbackMuted: boolean
 }
 
 interface NetWatchKeepWatchingItem {
@@ -222,6 +228,14 @@ interface Window {
       get: () => Promise<NetWatchAppSettings>
       update: (patch: Partial<Omit<NetWatchAppSettings, 'version'>>) => Promise<{ cancelled: boolean; settings: NetWatchAppSettings }>
     }
+    library: {
+      list: () => Promise<import('./types/library').LibraryState>
+      addFolder: () => Promise<import('./types/library').LibraryState>
+      removeFolder: (id: string) => Promise<import('./types/library').LibraryState>
+      search: (query: string) => Promise<{ results: import('./types/metadata').TmdbCatalogSummary[] }>
+      match: (id: string, selection: import('./types/library').LibrarySelection | null) => Promise<import('./types/library').LibraryState>
+      play: (id: string) => Promise<{ session: NativePlayerSession }>
+    }
     keepWatching: {
       getState: () => Promise<NetWatchKeepWatchingState>
       remove: (catalogId: string) => Promise<{ removed: boolean; state: NetWatchKeepWatchingState }>
@@ -274,7 +288,13 @@ interface Window {
       }>
       getSession: () => Promise<NativePlayerSession | null>
       getState: () => Promise<NativePlayerState>
+      getPreferences: () => Promise<import('./types/playback').PlaybackPreferences>
+      updatePreferences: (patch: Partial<import('./types/playback').PlaybackPreferences>) => Promise<import('./types/playback').PlaybackPreferences>
       getPreparation: () => Promise<NativePlayerPreparationState>
+      getEpisodeInfo: (openedAt: string) => Promise<EpisodePlaybackInfo | null>
+      getNextEpisode: (openedAt: string) => Promise<import('./types/metadata').TmdbEpisode | null>
+      playNextEpisode: (openedAt: string) => Promise<{ session: NativePlayerSession }>
+      skipIntro: (openedAt: string) => Promise<boolean>
       command: (action: NativePlayerAction) => Promise<unknown>
       close: () => Promise<void>
       setFullscreen: (enabled: boolean) => Promise<boolean>

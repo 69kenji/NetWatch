@@ -1,5 +1,7 @@
 'use strict'
 
+const { readResponseLimited } = require('../shared/bounded-response')
+
 function backendErrorMessage(payload, fallback) {
   const detail = payload?.detail
   if (typeof detail === 'string' && detail.trim()) return detail
@@ -20,13 +22,14 @@ function createBackendJson(baseUrl) {
     try {
       const response = await fetch(`${normalizedBaseUrl}${pathname}`, {
         ...options,
-        signal: controller.signal,
+        redirect: 'error',
+        signal: options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
         headers: {
           'Cache-Control': 'no-store',
           ...(options.headers || {}),
         },
       })
-      const text = await response.text()
+      const text = (await readResponseLimited(response)).toString('utf8')
       let payload = null
       try { payload = text ? JSON.parse(text) : null } catch (_) {}
 

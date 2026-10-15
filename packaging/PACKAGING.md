@@ -17,6 +17,14 @@ npm ci
 
 ## Build
 
+Fetch the bundled player before packaging a fresh clone:
+
+```powershell
+git lfs pull
+```
+
+Packaging checks that the required player files are Windows binaries and stops if a Git LFS pointer or missing file is found.
+
 Create an unpacked build first:
 
 ```powershell
@@ -35,10 +43,10 @@ Then build the NSIS installer:
 npm run package:win
 ```
 
-For 1.1.3:
+For 1.3.0:
 
 ```text
-release\NetWatch-Setup-1.1.3.exe
+release\NetWatch-Setup-1.3.0.exe
 ```
 
 ## Installer behavior

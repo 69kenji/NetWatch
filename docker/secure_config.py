@@ -558,6 +558,26 @@ def render_resolv(dns: list[str]) -> bytes:
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+def write_resolv(path: Path, dns: list[str]) -> None:
+    data = render_resolv(dns)
+    reject_symlink(path, kind="private resolver file")
+    reject_symlink(path.parent, kind="private directory")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        pass
+    else:
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise ConfigError("PRIVATE_PATH_UNSAFE", "NetWatch resolver path is not a regular file.")
+            # Preserve the inode used by existing Docker bind mounts. Only a
+            # real DNS change should replace the file; permissions still heal.
+            if handle.read(len(data) + 1) == data:
+                os.fchmod(handle.fileno(), 0o600)
+                return
+    atomic_write(path, data, 0o600)
+
+
 def remove_private_file(path: Path) -> None:
     reject_symlink(path, kind="private setup state file")
     try:
@@ -596,7 +616,7 @@ def promote_pending_wireguard(base: Path) -> None:
         "source_modified_at": None,
     }
     atomic_write(paths["wg_confs"] / "wg0.conf", render_wireguard(parsed), 0o600)
-    atomic_write(paths["config"] / "resolv.conf", render_resolv(list(parsed["dns"])), 0o600)
+    write_resolv(paths["config"] / "resolv.conf", list(parsed["dns"]))
     write_vpn_profile(paths["data"] / "vpn-profile.json", staged_profile)
     # Keep this marker until the promoted tunnel passes the normal live VPN gate.
     atomic_write(pending["marker"], b"pending\n", 0o600)
@@ -667,7 +687,7 @@ def inspect_state(base: Path) -> dict[str, object]:
             wg_valid = True
             dns = list(parsed["dns"])
             dns_count = len(dns)
-            atomic_write(resolv_path, render_resolv(dns), 0o600)
+            write_resolv(resolv_path, dns)
         except (OSError, UnicodeDecodeError, ConfigError) as exc:
             wg_error = exc.code if isinstance(exc, ConfigError) else "WG_READ_FAILED"
     if resolv_path.exists():
@@ -883,7 +903,7 @@ def main() -> int:
             # can never leave a new tunnel profile carrying a stale provider label/timer.
             remove_private_file(profile_path)
             atomic_write(paths["wg_confs"] / "wg0.conf", render_wireguard(parsed), 0o600)
-            atomic_write(paths["config"] / "resolv.conf", render_resolv(list(parsed["dns"])), 0o600)
+            write_resolv(paths["config"] / "resolv.conf", list(parsed["dns"]))
             write_vpn_profile(profile_path, profile)
             print(json.dumps({"ok": True, "dns_count": len(parsed["dns"]), "vpn_profile": vpn_profile_view(profile)}, separators=(",", ":")))
             return 0

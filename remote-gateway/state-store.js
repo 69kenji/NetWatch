@@ -59,7 +59,9 @@ class DeviceStore {
   add(device) {
     const existing = this.state.devices.find(item => item.id === device.id)
     if (existing) throw new Error('Device identifier already exists')
-    if (this.state.devices.length >= MAX_DEVICES) throw new Error('Paired device limit reached')
+    if (this.state.devices.filter(item => !item.revoked).length >= MAX_DEVICES) throw new Error('Paired device limit reached')
+    // Unknown credentials already fail authentication; revoked hashes need not be retained.
+    this.state.devices = this.state.devices.filter(item => !item.revoked)
     this.state.devices.push({ ...device })
     this.save()
   }

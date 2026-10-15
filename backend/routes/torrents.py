@@ -7,7 +7,7 @@ from contextlib import suppress
 from typing import Annotated, Optional
 
 import aiofiles
-from fastapi import APIRouter, HTTPException, Path as ApiPath, Request, Response
+from fastapi import APIRouter, Header, HTTPException, Path as ApiPath, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -19,12 +19,14 @@ from services.torrent_engine import (
     RangeRequestCancelledError,
     RangeRequestSupersededError,
     TorrentEngineService,
+    TorrentAdmissionError,
 )
 
 router = APIRouter()
-STARTUP_PREFIX_MIN_BYTES = 4 * 1024 * 1024
-STARTUP_PREFIX_MAX_BYTES = 8 * 1024 * 1024
-STARTUP_PREFIX_PIECES = 2
+STARTUP_PREFIX_MIN_BYTES = 512 * 1024
+STARTUP_PREFIX_MAX_BYTES = 2 * 1024 * 1024
+STARTUP_PREFIX_PIECES = 1
+STREAM_INITIAL_CHUNK_BYTES = 512 * 1024
 STREAM_CHUNK_BYTES = 4 * 1024 * 1024
 STREAM_RANGE_WAIT_SECONDS = 240.0
 STREAM_DISCONNECT_POLL_SECONDS = 0.1
@@ -60,6 +62,7 @@ async def _wait_for_stream_range(
     start: int,
     end: int,
     request_generation: int,
+    probe: bool = False,
 ):
     wait_task = asyncio.create_task(
         TorrentEngineService.wait_for_file_range(
@@ -69,6 +72,8 @@ async def _wait_for_stream_range(
             end,
             timeout_seconds=STREAM_RANGE_WAIT_SECONDS,
             request_generation=request_generation,
+            probe=probe,
+            allow_partial=True,
         )
     )
     try:
@@ -77,17 +82,18 @@ async def _wait_for_stream_range(
                 {wait_task}, timeout=STREAM_DISCONNECT_POLL_SECONDS
             )
             if done:
-                return await wait_task
+                status = await wait_task
+                ready_end = status.get("ready_end") if isinstance(status, dict) else None
+                if (not isinstance(status, dict) or status.get("ready") is not True
+                        or type(ready_end) is not int or not start <= ready_end <= end):
+                    raise DependencyUnavailableError("torrent-engine", "Invalid verified byte range")
+                return status
             if await request.is_disconnected():
-                await _cancel_stream_request(info_hash, request_generation)
-                wait_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await wait_task
                 raise StreamClientDisconnected
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, Exception):
         await _cancel_stream_request(info_hash, request_generation)
         wait_task.cancel()
-        with suppress(asyncio.CancelledError):
+        with suppress(asyncio.CancelledError, Exception):
             await wait_task
         raise
 
@@ -100,6 +106,7 @@ MAX_MAGNET_LENGTH = 16 * 1024
 
 
 class AddTorrentRequest(BaseModel):
+    owner_token: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{48}$")
     release_ref: Optional[str] = Field(default=None, min_length=32, max_length=128, pattern=RELEASE_REF_PATTERN)
     # Direct sources are retained for local lifecycle tooling, but HTTP(S) URLs
     # are intentionally forbidden here. Provider URLs must arrive through an
@@ -189,7 +196,7 @@ async def add_torrent(req: AddTorrentRequest):
 
         if source.lower().startswith("magnet:?"):
             added = await TorrentEngineService.add_torrent(
-                source, req.media_name, expected_hash=expected_hash
+                source, req.media_name, expected_hash=expected_hash, owner_token=req.owner_token
             )
         else:
             # Only opaque backend-issued references may resolve provider HTTP URLs.
@@ -202,6 +209,7 @@ async def add_torrent(req: AddTorrentRequest):
                     resolved["magnet"],
                     req.media_name,
                     expected_hash=expected_hash,
+                    owner_token=req.owner_token,
                 )
                 added["source_resolution"] = "prowlarr_redirect_to_magnet"
             else:
@@ -209,6 +217,7 @@ async def add_torrent(req: AddTorrentRequest):
                     resolved["torrent_bytes"],
                     req.media_name,
                     expected_hash=expected_hash,
+                    owner_token=req.owner_token,
                 )
                 added["source_resolution"] = "prowlarr_torrent_file"
 
@@ -218,6 +227,8 @@ async def add_torrent(req: AddTorrentRequest):
             ReleaseReferenceStore.discard(release_ref)
     except HTTPException:
         raise
+    except TorrentAdmissionError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except DependencyUnavailableError as exc:
@@ -264,8 +275,8 @@ def startup_prefix_target_bytes(video_file: dict) -> int:
 
     libtorrent verifies whole pieces, so a fixed byte target can accidentally
     mean one tiny piece on one torrent and many pieces on another. Aim for at
-    least 4 MiB and roughly two pieces, but never deliberately hold the player
-    for more than 8 MiB of selected-file prefix data. A single unusually large
+    least 512 KiB and roughly one piece, but never deliberately hold the player
+    for more than 2 MiB of selected-file prefix data. A single unusually large
     torrent piece may still exceed that cap because the piece itself must be
     complete before any bytes inside it are safe to serve.
     """
@@ -512,19 +523,23 @@ async def stream_file(info_hash: InfoHash, request: Request):
         return Response(status_code=status_code, media_type=media_type, headers=headers)
 
     request_generation = _next_stream_request_generation()
+    # Small bounded/suffix reads are commonly container index probes. They may
+    # fetch verified bytes without displacing the main playback window.
+    probe = bool(range_header and content_length <= STREAM_INITIAL_CHUNK_BYTES)
 
     # Do not commit HTTP headers until the first requested window is actually
     # available. While waiting, also watch the mpv connection so an abandoned
     # pre-seek request is cancelled instead of lingering for up to four minutes.
-    first_chunk_end = min(end, start + STREAM_CHUNK_BYTES - 1)
+    first_chunk_end = min(end, start + STREAM_INITIAL_CHUNK_BYTES - 1)
     try:
-        await _wait_for_stream_range(
+        first_status = await _wait_for_stream_range(
             request,
             info_hash,
             video_file,
             start,
             first_chunk_end,
             request_generation,
+            probe=probe,
         )
     except StreamClientDisconnected as exc:
         raise HTTPException(499, "Stream client disconnected") from exc
@@ -538,22 +553,26 @@ async def stream_file(info_hash: InfoHash, request: Request):
     async def iter_file():
         cursor = start
         first_window = True
+        chunk_bytes = STREAM_INITIAL_CHUNK_BYTES
         try:
             async with aiofiles.open(file_path, "rb") as file_handle:
                 while cursor <= end:
                     if await request.is_disconnected():
                         break
 
-                    chunk_end = min(end, cursor + STREAM_CHUNK_BYTES - 1)
+                    chunk_end = min(end, cursor + chunk_bytes - 1)
+                    wait_started = time.monotonic()
+                    status = first_status
                     if not first_window:
                         try:
-                            await _wait_for_stream_range(
+                            status = await _wait_for_stream_range(
                                 request,
                                 info_hash,
                                 video_file,
                                 cursor,
                                 chunk_end,
                                 request_generation,
+                                probe=probe,
                             )
                         except (
                             StreamClientDisconnected,
@@ -566,6 +585,14 @@ async def stream_file(info_hash: InfoHash, request: Request):
                             # owns scheduling after a seek and can retry normally.
                             break
                     first_window = False
+                    # The engine may release only a verified prefix. Never read
+                    # beyond that boundary, even when later sparse bytes exist.
+                    ready_end = status.get("ready_end")
+                    if not status.get("ready") or type(ready_end) is not int or not cursor <= ready_end <= chunk_end:
+                        break
+                    partial = ready_end < chunk_end
+                    chunk_end = ready_end
+                    waited = time.monotonic() - wait_started
 
                     wanted = chunk_end - cursor + 1
                     await file_handle.seek(cursor)
@@ -575,6 +602,8 @@ async def stream_file(info_hash: InfoHash, request: Request):
 
                     cursor += len(chunk)
                     yield chunk
+                    chunk_bytes = (STREAM_INITIAL_CHUNK_BYTES if partial or waited > .2
+                                   else min(STREAM_CHUNK_BYTES, chunk_bytes * 2))
         finally:
             await _cancel_stream_request(info_hash, request_generation)
 
@@ -587,11 +616,14 @@ async def stream_file(info_hash: InfoHash, request: Request):
 
 
 @router.delete("/{info_hash}")
-async def remove_torrent(info_hash: InfoHash, delete_files: bool = True):
+async def remove_torrent(info_hash: InfoHash, delete_files: bool = True,
+                         owner_token: Annotated[Optional[str], Header(alias="X-NetWatch-Owner", pattern=r"^[0-9a-f]{48}$")] = None):
     try:
         verified_absent = await TorrentEngineService.remove_torrent(
-            info_hash, delete_files, verify=True
+            info_hash, delete_files, verify=True, owner_token=owner_token
         )
+    except TorrentAdmissionError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
     except DependencyUnavailableError as exc:
         raise dependency_503(exc) from exc
     if not verified_absent:

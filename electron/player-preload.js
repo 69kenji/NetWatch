@@ -8,12 +8,19 @@ function subscribe(channel, callback) {
 }
 
 // The player overlay intentionally gets no runtime, setup, window-chrome, or
-// torrent-opening capability. It can only control the already-open player.
+// arbitrary torrent-opening capability. Episode advancement is derived from the
+// current session in the main process, not from a renderer-supplied URL or title.
 contextBridge.exposeInMainWorld('electron', {
   player: {
     getSession: () => ipcRenderer.invoke('player:get-session'),
     getState: () => ipcRenderer.invoke('player:get-state'),
+    getPreferences: () => ipcRenderer.invoke('player:preferences:get'),
+    updatePreferences: patch => ipcRenderer.invoke('player:preferences:update', patch),
     getPreparation: () => ipcRenderer.invoke('player:get-preparation'),
+    getEpisodeInfo: openedAt => ipcRenderer.invoke('player:episode-info', openedAt),
+    getNextEpisode: openedAt => ipcRenderer.invoke('player:next-episode-info', openedAt),
+    playNextEpisode: openedAt => ipcRenderer.invoke('player:next-episode', openedAt),
+    skipIntro: openedAt => ipcRenderer.invoke('player:skip-intro', openedAt),
     command: (action) => ipcRenderer.invoke('player:command', action),
     close: () => ipcRenderer.invoke('player:close'),
     setFullscreen: (enabled) => ipcRenderer.invoke('player:set-fullscreen', enabled),

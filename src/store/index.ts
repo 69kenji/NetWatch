@@ -16,6 +16,7 @@ export interface MediaItem {
   season?: number
   episode?: number
   episode_title?: string
+  is_anime?: boolean
 }
 
 export interface Subtitle {

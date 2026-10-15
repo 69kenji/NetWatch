@@ -14,7 +14,7 @@ from urllib.parse import urljoin, urlparse
 import aiohttp
 
 from config import settings
-from services.net_safety import authority_key, pinned_connector, read_response_limited, resolve_public_http_target
+from services.net_safety import authority_key, pinned_connector, read_json_limited, read_response_limited, resolve_public_http_target
 
 OPENSUBTITLES_BASE = "https://api.opensubtitles.com/api/v1"
 SUBDL_BASE = "https://api.subdl.com/api/v2"
@@ -190,7 +190,7 @@ class SubtitleService:
                 timeout=cls._timeout(12), headers=cls._subdl_headers(key)
             ) as session:
                 async with session.get(f"{SUBDL_BASE}/me") as response:
-                    payload = await response.json(content_type=None)
+                    payload = await read_json_limited(response)
                     if response.status in (401, 403) or (isinstance(payload, dict) and payload.get("status") is False):
                         error = payload.get("error") if isinstance(payload, dict) else None
                         result.update(status="unauthorized", error=error or f"authentication returned HTTP {response.status}")
@@ -366,7 +366,7 @@ class SubtitleService:
                 timeout=cls._timeout(), headers=cls._opensubtitles_headers()
             ) as session:
                 async with session.get(f"{OPENSUBTITLES_BASE}/subtitles", params=params) as response:
-                    payload = await response.json(content_type=None)
+                    payload = await read_json_limited(response)
                     if response.status != 200:
                         message = payload.get("message") if isinstance(payload, dict) else None
                         raise SubtitleProviderError(
@@ -433,7 +433,7 @@ class SubtitleService:
 
         async def fetch_json(session, path: str, params: dict[str, object]) -> dict:
             async with session.get(f"{SUBDL_BASE}{path}", params=params) as response:
-                current = await response.json(content_type=None)
+                current = await read_json_limited(response)
                 if response.status != 200 or (isinstance(current, dict) and current.get("status") is False):
                     message = None
                     if isinstance(current, dict):
@@ -679,7 +679,7 @@ class SubtitleService:
                 timeout=cls._timeout(30), headers=cls._opensubtitles_headers()
             ) as ticket_session:
                 async with ticket_session.post(f"{OPENSUBTITLES_BASE}/download", params=params) as response:
-                    payload = await response.json(content_type=None)
+                    payload = await read_json_limited(response)
                     if response.status not in (200, 201):
                         message = payload.get("message") if isinstance(payload, dict) else None
                         raise SubtitleProviderError(
@@ -871,14 +871,14 @@ class SubtitleService:
                     ) as response:
                         content_type = response.headers.get("Content-Type", "").lower()
                         if response.status != 200:
-                            text = await response.text()
+                            text = (await read_response_limited(response, 4096)).decode('utf-8', errors='replace')
                             raise SubtitleProviderError(
                                 "subdl",
                                 text[:200] or f"v2 download returned HTTP {response.status}",
                                 response.status,
                             )
                         if "json" in content_type:
-                            payload = await response.json(content_type=None)
+                            payload = await read_json_limited(response)
                             resolved = None
                             if isinstance(payload, dict):
                                 resolved = (

@@ -1,7 +1,7 @@
 const http = require('http')
+const { readResponseLimited, MAX_JSON_BYTES } = require('../shared/bounded-response')
 
 const DEFAULT_TIMEOUT_MS = 30_000
-const MAX_JSON_BYTES = 8 * 1024 * 1024
 
 class BackendError extends Error {
   constructor(status, payload) {
@@ -24,7 +24,8 @@ class BackendClient {
     this.baseUrl = parsed.origin
   }
 
-  async json(method, pathname, { body, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  async json(method, pathname, { body, ownerToken, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+    if (ownerToken !== undefined && !/^[0-9a-f]{48}$/u.test(ownerToken)) throw new Error('Invalid torrent owner token')
     if (!/^\/api\/[A-Za-z0-9/?=&._%-]+$/u.test(pathname) || pathname.includes('://')) {
       throw new Error('Backend path is not on the approved API surface')
     }
@@ -40,6 +41,7 @@ class BackendClient {
         method,
         headers: {
           Accept: 'application/json',
+          ...(ownerToken === undefined ? {} : { 'X-NetWatch-Owner': ownerToken }),
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -47,8 +49,7 @@ class BackendClient {
         redirect: 'error',
         signal: controller.signal,
       })
-      const raw = Buffer.from(await response.arrayBuffer())
-      if (raw.length > MAX_JSON_BYTES) throw new Error('Backend JSON response exceeds the gateway limit')
+      const raw = await readResponseLimited(response)
       let payload = null
       if (raw.length) {
         try {
@@ -83,13 +84,25 @@ class BackendClient {
     })
 
     let finished = false
+    let upstreamResponse = null
     const finish = () => {
       if (finished) return
       finished = true
       onClosed?.()
     }
+    const cancel = () => {
+      finish()
+      upstreamResponse?.destroy()
+      backendRequest.destroy()
+    }
 
     backendRequest.on('response', backendResponse => {
+      upstreamResponse = backendResponse
+      if (finished || remoteResponse.destroyed) {
+        backendResponse.destroy()
+        cancel()
+        return
+      }
       const responseHeaders = {}
       for (const name of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'x-netwatch-piece-gated']) {
         const value = backendResponse.headers[name]
@@ -104,6 +117,10 @@ class BackendClient {
     })
     backendRequest.on('timeout', () => backendRequest.destroy(new Error('Backend stream timed out')))
     backendRequest.on('error', error => {
+      if (finished || remoteResponse.destroyed) {
+        cancel()
+        return
+      }
       if (!remoteResponse.headersSent) {
         const payload = Buffer.from(JSON.stringify({ error: { code: 'PLAYBACK_NOT_READY', message: 'Media stream is unavailable' } }))
         remoteResponse.writeHead(503, {
@@ -117,10 +134,12 @@ class BackendClient {
       }
       finish()
     })
-    remoteRequest.on('aborted', () => backendRequest.destroy())
+    backendRequest.on('close', finish)
+    remoteRequest.on('aborted', cancel)
     remoteRequest.on('close', () => {
-      if (!remoteRequest.complete) backendRequest.destroy()
+      if (!remoteRequest.complete) cancel()
     })
+    remoteResponse.on('close', cancel)
     backendRequest.end()
     return backendRequest
   }

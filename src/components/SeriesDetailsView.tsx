@@ -119,6 +119,19 @@ export function SeriesDetailsView({
   const seasonRequestId = useRef(0)
   const streamRequestId = useRef(0)
   const episodeGridRef = useRef<HTMLDivElement | null>(null)
+  const releasesRef = useRef<HTMLElement | null>(null)
+  const [releaseSelection, setReleaseSelection] = useState(0)
+
+  useEffect(() => {
+    if (!releaseSelection) return
+    const frame = window.requestAnimationFrame(() => {
+      releasesRef.current?.scrollIntoView({
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+        block: 'start',
+      })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [releaseSelection])
 
   const seasons = useMemo(
     () => (details?.seasons || []).filter(season => season.season_number > 0 && season.episode_count > 0),
@@ -135,6 +148,8 @@ export function SeriesDetailsView({
   useEffect(() => {
     if (!details || seasonNumber == null) return
     const requestId = ++seasonRequestId.current
+    ++streamRequestId.current
+    setStreamLoading(false)
     setSeasonLoading(true)
     setSeasonError(null)
     setSeasonData(null)
@@ -156,12 +171,14 @@ export function SeriesDetailsView({
       .finally(() => {
         if (requestId === seasonRequestId.current) setSeasonLoading(false)
       })
+    return () => { ++seasonRequestId.current; ++streamRequestId.current }
   }, [details, seasonNumber])
 
   const selectEpisode = (episode: TmdbEpisode) => {
     if (!details) return
     const requestId = ++streamRequestId.current
     setSelectedEpisode(episode)
+    setReleaseSelection(current => current + 1)
     setStreamLoading(true)
     setStreamError(null)
     setStreamData(null)
@@ -400,7 +417,7 @@ export function SeriesDetailsView({
       </section>
 
       {selectedEpisode && (
-        <section className="nw-streams-section nw-episode-streams">
+        <section ref={releasesRef} className="nw-streams-section nw-episode-streams" style={{ scrollMarginTop: 88 }}>
           <div className="nw-streams-toolbar">
             <div>
               <span className="nw-kicker">Streams</span>

@@ -7,6 +7,7 @@ import { useAppStore } from '../../store'
 import type { MediaItem, Subtitle } from '../../store'
 
 interface Props {
+  localPlayback?: boolean
   mediaItem: MediaItem | null
   mediaTitle?: string | null
   filePath?: string | null
@@ -34,7 +35,7 @@ type ProviderMap = {
 }
 
 const LANGUAGES = [
-  ['en', 'English'], ['es', 'Spanish'], ['fr', 'French'], ['de', 'German'],
+  ['en', 'English'], ['el', 'Greek'], ['es', 'Spanish'], ['fr', 'French'], ['de', 'German'],
   ['it', 'Italian'], ['pt', 'Portuguese'], ['ru', 'Russian'], ['ja', 'Japanese'],
   ['ko', 'Korean'], ['zh', 'Chinese'], ['ar', 'Arabic'], ['nl', 'Dutch'],
   ['pl', 'Polish'], ['tr', 'Turkish'], ['sv', 'Swedish'], ['no', 'Norwegian'],
@@ -72,7 +73,7 @@ function formatDelay(ms: number) {
   return `${ms > 0 ? '+' : '−'}${Math.abs(ms / 1000).toFixed(1)} s`
 }
 
-export function TracksPanel({ mediaItem, mediaTitle, filePath, tracks = [], activeSubtitleTrack = null, activeAudioTrack = null, switchingAudioTrack = null, onSelectAudio, onSyncFeedback, onClose }: Props) {
+export function TracksPanel({ localPlayback = false, mediaItem, mediaTitle, filePath, tracks = [], activeSubtitleTrack = null, activeAudioTrack = null, switchingAudioTrack = null, onSelectAudio, onSyncFeedback, onClose }: Props) {
   const { player, updatePlayer } = useAppStore()
   const [subtitles, setSubtitles] = useState<Subtitle[]>([])
   const [providers, setProviders] = useState<ProviderMap>({})
@@ -80,16 +81,21 @@ export function TracksPanel({ mediaItem, mediaTitle, filePath, tracks = [], acti
   const [loadingId, setLoadingId] = useState<string | null>(null)
   const [selectedLang, setSelectedLang] = useState(() => loadUiPreferences().subtitleLanguage)
   const [error, setError] = useState<string | null>(null)
+  const [onlineSearch, setOnlineSearch] = useState(!localPlayback)
 
   const sourceFileName = useMemo(() => basename(filePath), [filePath])
   const searchTitle = mediaItem?.title || mediaTitle || sourceFileName || null
-  const canSearch = Boolean(mediaItem?.imdb_id || sourceFileName || searchTitle)
+  const episodeLabel = mediaItem?.type === 'tv' && mediaItem.season != null && mediaItem.episode != null
+    ? `S${String(mediaItem.season).padStart(2, '0')}E${String(mediaItem.episode).padStart(2, '0')}${mediaItem.episode_title ? ` · ${mediaItem.episode_title}` : ''}` : ''
+  const heading = [mediaItem?.title || mediaTitle, episodeLabel].filter(Boolean).join(' · ') || sourceFileName || 'Current video'
+  const canSearch = onlineSearch && Boolean(mediaItem?.imdb_id || sourceFileName || searchTitle)
   const delay = player.subtitleDelay || 0
   const audioTracks = tracks.filter(track => track.type === 'audio' && track.id != null)
   const embeddedTracks = tracks.filter(track => track.type === 'sub' && track.id != null && !track.external)
   const onlineProvidersConfigured = Boolean(providers.opensubtitles?.configured || providers.subdl?.configured)
 
   useEffect(() => {
+    if (!onlineSearch) return
     let mounted = true
     void api.get('/api/subtitles/providers')
       .then(({ data }) => {
@@ -98,6 +104,14 @@ export function TracksPanel({ mediaItem, mediaTitle, filePath, tracks = [], acti
       })
       .catch(() => {})
     return () => { mounted = false }
+  }, [onlineSearch])
+
+  useEffect(() => {
+    let active = true
+    void window.electron?.player.getPreferences().then(preferences => {
+      if (active && LANGUAGES.some(([code]) => code === preferences.preferredSubtitleLanguage)) setSelectedLang(preferences.preferredSubtitleLanguage)
+    }).catch(() => {})
+    return () => { active = false }
   }, [])
 
   useEffect(() => {
@@ -138,6 +152,7 @@ export function TracksPanel({ mediaItem, mediaTitle, filePath, tracks = [], acti
     setSelectedLang(language)
     const current = loadUiPreferences()
     saveUiPreferences({ ...current, subtitleLanguage: language })
+    void window.electron?.player.updatePreferences({ preferredSubtitleLanguage: language }).catch(() => {})
   }
 
   const loadSubtitle = async (sub: Subtitle) => {
@@ -233,7 +248,7 @@ export function TracksPanel({ mediaItem, mediaTitle, filePath, tracks = [], acti
       <header className="player-side-panel__header">
         <div className="player-side-panel__heading">
           <strong>Tracks</strong>
-          <span title={sourceFileName || searchTitle || undefined}>{sourceFileName || searchTitle || 'Current video'}</span>
+          <span className="player-track-title" title={heading}>{heading}</span>
         </div>
         <button className="btn btn-ghost btn-icon" onClick={onClose} title="Close tracks" aria-label="Close tracks">
           <Xmark width={18} height={18} />
@@ -350,7 +365,11 @@ export function TracksPanel({ mediaItem, mediaTitle, filePath, tracks = [], acti
             </div>
           )}
 
-          {!canSearch && !error && <div className="subtitle-panel__empty">Waiting for media…</div>}
+          {!onlineSearch && <div className="subtitle-panel__empty">
+            <button className="btn btn-secondary" onClick={() => setOnlineSearch(true)}>Search online</button>
+            <p>Search uses this title and filename through the VPN.</p>
+          </div>}
+          {onlineSearch && !canSearch && !error && <div className="subtitle-panel__empty">Waiting for media…</div>}
 
           {loading && subtitles.length === 0 && (
             <div className="subtitle-result-skeletons" aria-label="Searching subtitles">

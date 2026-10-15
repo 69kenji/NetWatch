@@ -7,7 +7,7 @@ import aiohttp
 
 from config import settings
 from services.exceptions import DependencyUnavailableError
-from services.net_safety import authority_key, pinned_connector, read_response_limited, resolve_public_http_target
+from services.net_safety import authority_key, pinned_connector, read_json_limited, read_response_limited, resolve_public_http_target
 
 # Resolution extraction from torrent title
 RESOLUTION_PATTERNS = {
@@ -99,7 +99,7 @@ class ProwlarrService:
                         result["error"] = f"status request returned HTTP {response.status}"
                         return result
 
-                    data = await response.json()
+                    data = await read_json_limited(response)
                     result["connected"] = True
                     result["authenticated"] = True
                     result["status"] = "ok"
@@ -107,7 +107,7 @@ class ProwlarrService:
                     result["app_name"] = data.get("appName")
                     result["instance_name"] = data.get("instanceName")
                     return result
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             result["status"] = "unavailable"
             result["error"] = str(exc)
             return result
@@ -139,15 +139,15 @@ class ProwlarrService:
                             "prowlarr", f"authentication returned HTTP {response.status}"
                         )
                     if response.status != 200:
-                        detail = (await response.text()).strip()
+                        detail = (await read_response_limited(response, MAX_ERROR_BODY_BYTES)).decode('utf-8', errors='replace').strip()
                         suffix = f": {detail[:300]}" if detail else ""
                         raise DependencyUnavailableError(
                             "prowlarr", f"search returned HTTP {response.status}{suffix}"
                         )
-                    raw = await response.json()
+                    raw = await read_json_limited(response)
         except DependencyUnavailableError:
             raise
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             raise DependencyUnavailableError("prowlarr", str(exc)) from exc
 
         if not isinstance(raw, list):

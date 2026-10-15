@@ -102,6 +102,9 @@ class RateLimitMiddleware:
     _METADATA_DETAIL_RE = re.compile(
         r"^/api/metadata/(?:movies/\d+|series/\d+(?:/seasons/\d+)?)$"
     )
+    _EPISODE_PLAYBACK_RE = re.compile(
+        r"^/api/metadata/series/\d+/episodes/\d+/\d+/(?:playback-info|next-episode)$"
+    )
 
     def __init__(self, app):
         self.app = app
@@ -116,6 +119,8 @@ class RateLimitMiddleware:
             return ("metadata-stream-options", 60, 60.0)
         if method == "GET" and self._METADATA_DETAIL_RE.fullmatch(path):
             return ("metadata-details", 90, 60.0)
+        if method == "GET" and self._EPISODE_PLAYBACK_RE.fullmatch(path):
+            return ("episode-playback", 30, 60.0)
         return None
 
     async def __call__(self, scope, receive, send):

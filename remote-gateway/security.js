@@ -14,6 +14,8 @@ const FORBIDDEN_RESPONSE_KEYS = new Set([
   'download_ref',
   'hash',
   'info_hash',
+  'owner_token',
+  'ownertoken',
   'path',
   'source_type',
   'torrent_hash',

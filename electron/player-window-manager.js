@@ -336,8 +336,6 @@ function createPlayerWindowManager({
     setTitle,
     showOverlay,
     showShell,
-    showVideoFromLaunchState,
-    syncBounds,
     toggleFullscreen,
   }
 }

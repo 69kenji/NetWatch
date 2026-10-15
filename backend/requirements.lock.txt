@@ -1,5 +1,5 @@
 # NetWatch backend transitive dependency lock.
-# Captured from the clean Step 10 backend image on 2026-08-20.
+# Update alongside requirements.txt when changing dependency versions.
 # requirements.txt remains the human-readable direct dependency list; this file
 # is the exact application dependency graph installed by the Docker build.
 aiofiles==23.2.1
@@ -16,7 +16,7 @@ frozenlist==1.8.0
 h11==0.16.0
 httptools==0.8.0
 idna==3.19
-multidict==6.7.1
+multidict==6.9.1
 propcache==0.5.2
 pydantic==2.13.4
 pydantic-settings==2.14.2

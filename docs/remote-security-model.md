@@ -9,13 +9,17 @@ Remote Access connects the Android client over the LAN. The PC handles torrents,
 - Remote Access is off by default. When disabled, no LAN routes are available.
 - The PC creates an ECDSA P-256 identity. Electron `safeStorage` encrypts its private key, which is never sent to a renderer.
 - Pairing requires a user-created QR code that expires after five minutes and can be claimed once. Failed claims are rate-limited.
+- Claims recheck expiry, cancellation and attempt limits after reading the body; concurrent requests cannot reuse the same secret.
 - Each phone receives a 256-bit credential. The PC stores its SHA-256 hash. Revocation closes that phone's responses and sessions.
 - Requests identify media with catalog IDs, opaque release references, and server-created session IDs. URLs, magnets, local paths, UNC paths, and file URIs are rejected.
 - Responses remove provider URLs and keys, torrent details, local paths, WireGuard data, and loopback service addresses.
 - Artwork and subtitles pass through fixed gateway routes. Provider URLs are not sent to Android.
 - Video uses verified-piece range streaming with backpressure and cancellation.
 - Protocol v1 allows one Android stream per phone, three total streams, and one stream per torrent hash because each hash has one seek/deadline window.
-- Remote torrents use reference-counted leases and are removed only when the last lease closes and the desktop player is not using the hash.
+- Each torrent has one playback owner, enforced by the engine for desktop and phone requests. Opening the same release in another session returns a busy response; different releases can play in parallel. Cleanup requires the owning session's token, which is never sent to the phone or renderer.
+- Revocation, shutdown and disconnected playback requests cannot register a late session. An in-flight add is allowed to return its hash so newly created, unshared data can be cleaned up.
+- Closing a response or session stops its upstream streams and releases their slots. Closed sessions do not retain title mappings.
+- Pairing allows up to 64 active devices. Pairing a replacement prunes revoked records; removed credentials remain invalid.
 
 ## Android client
 

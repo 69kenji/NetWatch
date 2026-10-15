@@ -3,6 +3,7 @@ import asyncio
 import aiohttp
 
 from config import settings
+from services.net_safety import read_json_limited
 
 
 class FlareSolverrService:
@@ -32,7 +33,7 @@ class FlareSolverrService:
                         result["status"] = "unavailable"
                         result["error"] = f"sessions.list returned HTTP {response.status}"
                         return result
-                    data = await response.json(content_type=None)
+                    data = await read_json_limited(response)
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             result["status"] = "unavailable"
             result["error"] = str(exc)

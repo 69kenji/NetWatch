@@ -1,7 +1,8 @@
 const fs = require('fs')
 const path = require('path')
+const { PLAYBACK_DEFAULTS, normalizePlaybackPreferences } = require('../shared/playback-preferences.mjs')
 
-const SETTINGS_VERSION = 3
+const SETTINGS_VERSION = 4
 const DEFAULT_APP_SETTINGS = Object.freeze({
   version: SETTINGS_VERSION,
   onClose: 'exit',
@@ -12,6 +13,10 @@ const DEFAULT_APP_SETTINGS = Object.freeze({
   defaultQuality: 'all',
   flareSolverrEnabled: false,
   resourceProfile: 'standard',
+  playbackVolume: 100,
+  playbackMuted: false,
+  alwaysSkipIntro: false,
+  ...PLAYBACK_DEFAULTS,
 })
 
 const QUALITY_VALUES = new Set(['all', '2160p', '1080p', '720p'])
@@ -38,6 +43,7 @@ function normalizeSettings(value, fallback = DEFAULT_APP_SETTINGS) {
   const candidate = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
   const limit = Number(candidate.keepWatchingLimit)
   return {
+    ...normalizePlaybackPreferences(candidate, fallback),
     version: SETTINGS_VERSION,
     onClose: candidate.onClose === 'minimize-to-tray' || candidate.onClose === 'exit'
       ? candidate.onClose
@@ -63,6 +69,13 @@ function normalizeSettings(value, fallback = DEFAULT_APP_SETTINGS) {
     resourceProfile: candidate.resourceProfile === 'reduced' || candidate.resourceProfile === 'standard'
       ? candidate.resourceProfile
       : fallback.resourceProfile,
+    playbackVolume: typeof candidate.playbackVolume === 'number' && Number.isFinite(candidate.playbackVolume)
+      ? Math.max(0, Math.min(150, candidate.playbackVolume))
+      : fallback.playbackVolume,
+    playbackMuted: typeof candidate.playbackMuted === 'boolean'
+      ? candidate.playbackMuted : fallback.playbackMuted,
+    alwaysSkipIntro: typeof candidate.alwaysSkipIntro === 'boolean'
+      ? candidate.alwaysSkipIntro : fallback.alwaysSkipIntro,
   }
 }
 
@@ -106,10 +119,15 @@ class AppSettingsStore {
       'defaultQuality',
       'flareSolverrEnabled',
       'resourceProfile',
+      'playbackVolume',
+      'playbackMuted',
+      'alwaysSkipIntro',
+      ...Object.keys(PLAYBACK_DEFAULTS),
     ])
     if (Object.keys(patch).some(key => !allowed.has(key))) throw new Error('Settings update contains an unsupported field')
-    this.value = normalizeSettings({ ...this.value, ...patch }, this.value)
-    atomicJson(this.filePath, this.value)
+    const next = normalizeSettings({ ...this.value, ...patch }, this.value)
+    atomicJson(this.filePath, next)
+    this.value = next
     return this.get()
   }
 }

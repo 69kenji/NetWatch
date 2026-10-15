@@ -17,9 +17,11 @@ import { SeriesDetailsView } from './components/SeriesDetailsView'
 import { RuntimeDiagnostics } from './components/RuntimeDiagnostics'
 import { SettingsView } from './components/SettingsView'
 import { Sidebar } from './components/Sidebar'
+import { LibraryView } from './components/LibraryView'
 import { TitleBar } from './components/TitleBar'
 import { loadUiPreferences, saveUiPreferences, type NetWatchUiPreferences } from './utils/preferences'
 import { BACKEND_BASE_URL } from './utils/api'
+import { PLAYBACK_DEFAULTS, normalizePlaybackPreferences } from '../shared/playback-preferences.mjs'
 import {
   toMediaItem,
   toSeriesMediaItem,
@@ -66,7 +68,7 @@ const EMPTY_HOME: TmdbHomePayload = { movies: [], recent_movies: [], tv: [], rec
 
 type DetailReturnView = 'home' | 'discover' | 'search'
 type SearchReturnView = 'home' | 'discover' | 'settings'
-type SimpleNavigationView = 'home' | 'discover' | 'settings'
+type SimpleNavigationView = 'home' | 'discover' | 'settings' | 'library'
 type NavigationEntry =
   | { view: SimpleNavigationView }
   | { view: 'search'; returnView: SearchReturnView }
@@ -308,6 +310,7 @@ export default function App() {
     setPreferences(current => {
       const next = {
         ...current,
+        ...normalizePlaybackPreferences(settings),
         defaultQuality: settings.defaultQuality,
         onClose: settings.onClose,
         startWithWindows: settings.startWithWindows,
@@ -316,12 +319,24 @@ export default function App() {
         keepWatchingLimit: settings.keepWatchingLimit,
         flareSolverrEnabled: settings.flareSolverrEnabled,
         resourceProfile: settings.resourceProfile,
+        alwaysSkipIntro: settings.alwaysSkipIntro,
       }
       saveUiPreferences(next)
       return next
     })
     setQualityFilter(settings.defaultQuality)
   }, [])
+
+  useEffect(() => {
+    let active = true
+    const refresh = () => {
+      void window.electron?.settings.get().then(settings => {
+        if (active) applyMainSettings(settings)
+      }).catch(() => {})
+    }
+    window.addEventListener('focus', refresh)
+    return () => { active = false; window.removeEventListener('focus', refresh) }
+  }, [applyMainSettings])
 
   useEffect(() => {
     const api = window.electron?.settings
@@ -814,7 +829,7 @@ export default function App() {
   }
 
   const navigate = (next: NetWatchView) => {
-    if (!['home', 'discover', 'search', 'settings'].includes(next)) return
+    if (!['home', 'discover', 'search', 'settings', 'library'].includes(next)) return
     const entry: NavigationEntry = next === 'search'
       ? { view: 'search', returnView: searchReturnView }
       : { view: next as SimpleNavigationView }
@@ -952,6 +967,10 @@ export default function App() {
     if (patch.keepWatchingLimit !== undefined) mainPatch.keepWatchingLimit = patch.keepWatchingLimit
     if (patch.flareSolverrEnabled !== undefined) mainPatch.flareSolverrEnabled = patch.flareSolverrEnabled
     if (patch.resourceProfile !== undefined) mainPatch.resourceProfile = patch.resourceProfile
+    if (patch.alwaysSkipIntro !== undefined) mainPatch.alwaysSkipIntro = patch.alwaysSkipIntro
+    for (const key of Object.keys(PLAYBACK_DEFAULTS)) {
+      if (patch[key] !== undefined) mainPatch[key] = patch[key]
+    }
     if (!Object.keys(mainPatch).length) return
     void api.update(mainPatch).then(result => {
       if (!result.cancelled) applyMainSettings(result.settings)
@@ -1118,6 +1137,8 @@ export default function App() {
                 onRetry={() => void loadDiscover()}
                 onSelect={item => loadCatalogItem(item, 'discover')}
               />
+            ) : view === 'library' ? (
+              <LibraryView runtimeReady={runtime.ready} />
             ) : view === 'settings' ? (
               <SettingsView
                 preferences={preferences}

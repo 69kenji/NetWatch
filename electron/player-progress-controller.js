@@ -12,7 +12,8 @@ function createPlayerProgressController({ getAppSettings, keepWatching, mpv }) {
   }
 
   function checkpointDesktop(session, state = mpv.getState(), { force = false } = {}) {
-    if (!session?.mediaItem || session.resumePending || !getAppSettings().keepWatchingEnabled) return false
+    // Keep Watching resumes protected streams on PC and phone, not local disk files.
+    if (!session?.mediaItem || session.localFileId || session.resumePending || !getAppSettings().keepWatchingEnabled) return false
     const now = Date.now()
     if (!force && now - lastCheckpointAt < 15_000) return false
     const status = String(state?.status || '')

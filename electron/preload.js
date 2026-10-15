@@ -19,6 +19,14 @@ contextBridge.exposeInMainWorld('electron', {
     get: () => ipcRenderer.invoke('settings:get'),
     update: (patch) => ipcRenderer.invoke('settings:update', patch),
   },
+  library: {
+    list: () => ipcRenderer.invoke('library:list'),
+    addFolder: () => ipcRenderer.invoke('library:add-folder'),
+    removeFolder: id => ipcRenderer.invoke('library:remove-folder', id),
+    search: query => ipcRenderer.invoke('library:search', query),
+    match: (id, selection) => ipcRenderer.invoke('library:match', id, selection),
+    play: id => ipcRenderer.invoke('library:play', id),
+  },
   keepWatching: {
     getState: () => ipcRenderer.invoke('keep-watching:get-state'),
     remove: catalogId => ipcRenderer.invoke('keep-watching:remove', catalogId),

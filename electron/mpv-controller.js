@@ -3,6 +3,9 @@ const { spawn } = require('child_process')
 const fs = require('fs')
 const net = require('net')
 const path = require('path')
+const { normalizeAudioPreferences } = require('./player-audio-preferences')
+const { normalizeChapters } = require('./player-episode-timing')
+const { playbackArguments } = require('./player-playback-preferences')
 
 const OBSERVED_PROPERTIES = [
   'pause',
@@ -18,6 +21,7 @@ const OBSERVED_PROPERTIES = [
   'sid',
   'sub-delay',
   'track-list',
+  'chapter-list',
   'demuxer-cache-duration',
   'cache-buffering-state',
   'paused-for-cache',
@@ -274,6 +278,7 @@ class MpvController extends EventEmitter {
       subtitleTrack: null,
       subtitleDelay: 0,
       tracks: [],
+      chapters: [],
       cacheDuration: 0,
       cacheBufferingState: 0,
       pausedForCache: false,
@@ -291,7 +296,8 @@ class MpvController extends EventEmitter {
   }
 
   getState() {
-    return { ...this.state, tracks: Array.isArray(this.state.tracks) ? [...this.state.tracks] : [] }
+    return { ...this.state, tracks: Array.isArray(this.state.tracks) ? [...this.state.tracks] : [],
+      chapters: this.state.chapters.map(chapter => ({ ...chapter })) }
   }
 
   _setState(patch) {
@@ -332,7 +338,7 @@ class MpvController extends EventEmitter {
     this.emit('log', { level, message: String(message), timestamp: new Date().toISOString() })
   }
 
-  async start(videoWindow, initialSource = null) {
+  async start(videoWindow, initialSource = null, audioPreferences = {}) {
     if (process.platform !== 'win32') {
       throw new Error('Native mpv HWND embedding is implemented for the Windows desktop target only')
     }
@@ -346,7 +352,8 @@ class MpvController extends EventEmitter {
     this.startupHoldActive = Boolean(initialSource)
     this._cancelStartupReadyWaiter()
     this.state = this._defaultState()
-    this._setState({ status: 'starting' })
+    const { playbackVolume, playbackMuted } = normalizeAudioPreferences(audioPreferences)
+    this._setState({ status: 'starting', volume: playbackVolume, muted: playbackMuted })
 
     const hwnd = nativeWindowHandleToDecimal(videoWindow)
     this.parentHwnd = hwnd
@@ -354,13 +361,20 @@ class MpvController extends EventEmitter {
     const executable = resolveMpvExecutable()
     const args = [
       '--no-config',
+      // Media must not redirect Windows mpv to URLs outside the protected backend.
+      '--access-references=no',
+      '--autoload-files=no',
+      '--load-scripts=no',
+      '--ytdl=no',
+      ...playbackArguments(audioPreferences),
       '--idle=yes',
       '--keep-open=always',
       // Create the embedded --wid surface immediately instead of waiting for
-      // the stream to produce a decoded video frame. In this direct-launch
-      // experiment mpv owns the embedded child-window lifecycle itself.
+      // the stream to produce a decoded video frame. mpv owns the child window.
       '--force-window=immediate',
       '--volume-max=150',
+      `--volume=${playbackVolume}`,
+      `--mute=${playbackMuted ? 'yes' : 'no'}`,
       '--vo=gpu-next',
       '--gpu-api=d3d11',
       '--gpu-context=d3d11',
@@ -373,8 +387,11 @@ class MpvController extends EventEmitter {
       '--cache=yes',
       '--cache-pause=yes',
       '--cache-pause-wait=3',
-      '--cache-secs=30',
-      '--demuxer-max-bytes=256MiB',
+      // Let mpv read ahead to its byte budget rather than stopping at 30s.
+      // Torrent payload stays in the runtime; never create a Windows disk cache.
+      `--demuxer-max-bytes=${audioPreferences.resourceProfile === 'reduced' ? 256 : 512}MiB`,
+      '--demuxer-hysteresis-secs=0',
+      '--cache-on-disk=no',
       '--network-timeout=300',
       `--wid=${hwnd}`,
       `--input-ipc-server=${this.pipeName}`,
@@ -416,9 +433,8 @@ class MpvController extends EventEmitter {
 
     await this._observeProperties()
 
-    // Keep the existing surface-sync call site so fullscreen/restore behavior
-    // remains isolated from launch behavior. This method
-    // deliberately performs no Win32 manipulation; mpv owns --wid embedding.
+    // The native surface helper keeps the embedded window sized and ordered
+    // correctly through fullscreen and restore transitions.
     await this.syncVideoSurface(videoWindow, 5000)
 
     this.ready = true
@@ -655,6 +671,9 @@ class MpvController extends EventEmitter {
       case 'track-list':
         this._setState({ tracks: Array.isArray(value) ? value : [] })
         break
+      case 'chapter-list':
+        this._setState({ chapters: normalizeChapters(value) })
+        break
       case 'demuxer-cache-duration':
         if (Number.isFinite(value)) this._setState({ cacheDuration: value })
         break
@@ -737,14 +756,6 @@ class MpvController extends EventEmitter {
       pending.reject(error)
     }
     this.pending.clear()
-  }
-
-  async load(source) {
-    if (typeof source !== 'string' || !source.trim()) throw new Error('Player source is required')
-    if (!this.ready) throw new Error('mpv is not ready')
-    this._setState({ status: 'loading', source, position: 0, duration: 0, eofReached: false, error: null })
-    await this.request(['loadfile', source, 'replace'])
-    return this.getState()
   }
 
   async execute(action) {
@@ -875,7 +886,7 @@ class MpvController extends EventEmitter {
       await new Promise(resolve => setTimeout(resolve, 500))
     }
 
-    // The direct-launch experiment uses a detached child. Keep explicit PID
+    // The player uses a detached child. Keep explicit PID
     // cleanup so mpv cannot survive a NetWatch player shutdown.
     if (process.platform === 'win32' && mpvPid) {
       try {

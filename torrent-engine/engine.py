@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from stream_policy import DemandRate
+
 try:
     import libtorrent as lt
 except ImportError:  # Allows syntax/unit testing outside the engine container.
@@ -61,7 +63,6 @@ RANGE_LOOKAHEAD_BYTES = _env_int(
 ACTIVE_DOWNLOADS = _env_int("NETWATCH_ACTIVE_DOWNLOADS", 8, 1)
 ACTIVE_LIMIT = _env_int("NETWATCH_ACTIVE_LIMIT", 16, 1)
 CONNECTIONS_LIMIT = _env_int("NETWATCH_CONNECTIONS_LIMIT", 500, 20)
-DEADLINE_STEP_MS = _env_int("NETWATCH_DEADLINE_STEP_MS", 250, 10)
 RANGE_POLL_MS = _env_int("NETWATCH_RANGE_POLL_MS", 100, 25)
 
 
@@ -73,13 +74,20 @@ class TorrentRecord:
     media_name: str
     added_at: float = field(default_factory=time.time)
     selected_file_index: Optional[int] = None
-    selected_path: Optional[str] = None
-    selected_size: int = 0
+    owner_token: Optional[str] = None
+    removing: bool = False
     prepared: bool = False
     deadline_window: Optional[tuple[int, int]] = None
     pending_far_window: Optional[tuple[int, int, float, int]] = None
     active_request_generation: Optional[int] = None
     cancelled_request_generations: set[int] = field(default_factory=set)
+    piece_deadlines: dict[int, float] = field(default_factory=dict)
+    probe_windows: dict[int, tuple[int, int, float]] = field(default_factory=dict)
+    demand: DemandRate = field(default_factory=DemandRate)
+    torrent_info: Any = None
+    file_storage: Any = None
+    file_entries: Optional[tuple[dict[str, Any], ...]] = None
+    selected_video: Optional[dict[str, Any]] = None
 
 
 class TorrentEngineError(RuntimeError):
@@ -87,6 +95,14 @@ class TorrentEngineError(RuntimeError):
 
 
 class TorrentNotFoundError(TorrentEngineError):
+    pass
+
+
+class TorrentBusyError(TorrentEngineError):
+    pass
+
+
+class TorrentCapacityError(TorrentEngineError):
     pass
 
 
@@ -277,6 +293,8 @@ class TorrentEngine:
 
     @staticmethod
     def _set_add_flags(params: Any) -> None:
+        # Never adopt an existing native handle if a hybrid alias was not yet known.
+        params.flags |= lt.torrent_flags.duplicate_is_error
         try:
             params.flags &= ~lt.torrent_flags.auto_managed
         except Exception:
@@ -299,6 +317,7 @@ class TorrentEngine:
         expected_hash: Optional[str],
         media_name: str,
         resolution: str,
+        owner_token: Optional[str] = None,
     ) -> dict[str, Any]:
         with self._lock:
             expected = self._valid_hash(expected_hash) if expected_hash else None
@@ -312,22 +331,46 @@ class TorrentEngine:
                 raise TorrentEngineError("torrent source did not expose a deterministic v1/v2 info hash")
 
             existing = self._records.get(requested_hash)
-            if existing and existing.handle.is_valid():
+            # A hybrid torrent's v1 and v2 hashes refer to the same native handle.
+            if existing is None:
+                for record in self._records.values():
+                    aliases = {record.info_hash}
+                    try:
+                        aliases.update(self._hash_candidates(record.handle.info_hashes()))
+                    except Exception:
+                        pass
+                    if aliases.intersection([requested_hash, *candidates]):
+                        existing = record
+                        break
+            if existing:
+                if owner_token is None or existing.owner_token != owner_token or existing.removing:
+                    raise TorrentBusyError("This release is already playing in another session")
+                if not existing.handle.is_valid():
+                    raise TorrentBusyError("This release needs cleanup before it can be opened again")
                 return {
-                    "hash": requested_hash,
+                    "hash": existing.info_hash,
                     "resolution": resolution,
                     "already_existed": True,
                     "engine": "libtorrent",
                 }
 
+            downloading = 0
+            for record in self._records.values():
+                try:
+                    complete = record.prepared and record.handle.status().is_finished
+                except Exception:
+                    complete = False
+                downloading += not complete
+            if len(self._records) >= ACTIVE_LIMIT or downloading >= ACTIVE_DOWNLOADS:
+                raise TorrentCapacityError("Torrent capacity reached; close another playback session and retry")
+
+            self._set_add_flags(params)
             save_path = self._create_save_path()
             params.save_path = save_path
             try:
                 params.upload_limit = UPLOAD_LIMIT
             except Exception:
                 logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
-            self._set_add_flags(params)
-
             try:
                 handle = self._session.add_torrent(params)
                 try:
@@ -364,6 +407,7 @@ class TorrentEngine:
                 handle=handle,
                 save_path=save_path,
                 media_name=media_name,
+                owner_token=owner_token,
             )
             logger.info("Added %s for %s", canonical_hash, media_name)
             return {
@@ -378,6 +422,7 @@ class TorrentEngine:
         source: str,
         expected_hash: Optional[str],
         media_name: str,
+        owner_token: Optional[str] = None,
     ) -> dict[str, Any]:
         if not source.lower().startswith("magnet:?"):
             raise ValueError("direct libtorrent engine accepts magnet URIs only in add_magnet")
@@ -385,13 +430,14 @@ class TorrentEngine:
             params = lt.parse_magnet_uri(source)
         except Exception as exc:
             raise ValueError(f"invalid magnet URI: {exc}") from exc
-        return self._finish_add(params, expected_hash, media_name, "magnet_info_hash")
+        return self._finish_add(params, expected_hash, media_name, "magnet_info_hash", owner_token)
 
     def add_torrent_bytes(
         self,
         torrent_bytes: bytes,
         expected_hash: Optional[str],
         media_name: str,
+        owner_token: Optional[str] = None,
     ) -> dict[str, Any]:
         if not torrent_bytes:
             raise ValueError("torrent metadata is empty")
@@ -403,7 +449,7 @@ class TorrentEngine:
                 params.ti = lt.torrent_info(lt.bdecode(torrent_bytes))
         except Exception as exc:
             raise ValueError(f"invalid .torrent metadata: {exc}") from exc
-        return self._finish_add(params, expected_hash, media_name, "torrent_info_hash")
+        return self._finish_add(params, expected_hash, media_name, "torrent_info_hash", owner_token)
 
     def _record(self, info_hash: str) -> TorrentRecord:
         normalized = self._valid_hash(info_hash)
@@ -553,16 +599,33 @@ class TorrentEngine:
             return [first, first]
         return [offset // piece_size, (offset + size - 1) // piece_size]
 
+    def _metadata(self, record: TorrentRecord):
+        if record.torrent_info is None:
+            info = self._torrent_info(record.handle)
+            if info is None:
+                return None, None
+            storage = self._file_storage(info)
+            piece_size = max(0, int(info.piece_length()))
+            record.file_entries = tuple({
+                "index": index, "name": str(storage.file_path(index)),
+                "size": max(0, int(storage.file_size(index))),
+                "offset": max(0, int(storage.file_offset(index))),
+                "piece_range": self._piece_range_for_file(storage, index, piece_size),
+                "availability": 0.0,
+            } for index in range(int(storage.num_files())))
+            record.torrent_info, record.file_storage = info, storage
+        return record.torrent_info, record.file_storage
+
     def files(self, info_hash: str) -> dict[str, Any]:
         with self._lock:
             record = self._record(info_hash)
-            info = self._torrent_info(record.handle)
+            info, storage = self._metadata(record)
             if info is None:
                 return {"metadata_ready": False, "files": []}
-            storage = self._file_storage(info)
-            piece_size = max(0, int(info.piece_length()))
             try:
-                progress_values = list(record.handle.file_progress())
+                granularity = getattr(getattr(lt, "torrent_handle", None), "piece_granularity", None)
+                progress_values = list(record.handle.file_progress(granularity) if granularity is not None
+                                       else record.handle.file_progress())
             except Exception:
                 logger.debug("Could not read libtorrent file progress", exc_info=True)
                 progress_values = []
@@ -573,8 +636,8 @@ class TorrentEngine:
                 priorities = []
 
             files: list[dict[str, Any]] = []
-            for index in range(int(storage.num_files())):
-                size = max(0, int(storage.file_size(index)))
+            for entry in record.file_entries or ():
+                index, size = entry["index"], entry["size"]
                 downloaded = (
                     max(0, int(progress_values[index])) if index < len(progress_values) else 0
                 )
@@ -585,14 +648,10 @@ class TorrentEngine:
                     priority = 0
                 files.append(
                     {
-                        "index": index,
-                        "name": str(storage.file_path(index)),
-                        "size": size,
+                        **entry,
                         "progress": min(1.0, downloaded / size) if size > 0 else 1.0,
                         "priority": priority,
-                        "availability": 0.0,
-                        "piece_range": self._piece_range_for_file(storage, index, piece_size),
-                        "offset": max(0, int(storage.file_offset(index))),
+                        "piece_range": list(entry["piece_range"]),
                     }
                 )
             return {"metadata_ready": True, "files": files}
@@ -629,7 +688,7 @@ class TorrentEngine:
             if not file_state["metadata_ready"]:
                 return {"metadata_ready": False, "video_file": None, "files": []}
 
-            selected = self.select_video_file(file_state["files"])
+            selected = dict(record.selected_video) if record.selected_video else self.select_video_file(file_state["files"])
             if not selected:
                 return {
                     "metadata_ready": True,
@@ -637,10 +696,9 @@ class TorrentEngine:
                     "files": file_state["files"],
                 }
 
-            info = self._torrent_info(record.handle)
+            info, storage = self._metadata(record)
             if info is None:
                 raise TorrentEngineError("torrent metadata unexpectedly unavailable during prepare")
-            storage = self._file_storage(info)
             index = int(selected["index"])
             if not record.prepared or record.selected_file_index != index:
                 priorities = [0] * int(storage.num_files())
@@ -652,12 +710,16 @@ class TorrentEngine:
                 record.pending_far_window = None
                 record.active_request_generation = None
                 record.cancelled_request_generations.clear()
+                record.piece_deadlines.clear()
+                record.probe_windows.clear()
+                record.demand.reset()
                 try:
                     record.handle.clear_piece_deadlines()
                 except Exception:
                     logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
                 logger.info("Selected file %s for %s", selected["name"], info_hash)
 
+            selected["progress"] = file_state["files"][index]["progress"]
             selected["priority"] = 7
             selected["piece_size"] = max(0, int(info.piece_length()))
             selected["pieces_num"] = max(0, int(info.num_pieces()))
@@ -665,8 +727,7 @@ class TorrentEngine:
             selected_path = os.path.realpath(selected["path"])
             if os.path.commonpath([record.save_path, selected_path]) != record.save_path:
                 raise TorrentEngineError("selected file resolved outside managed save path")
-            record.selected_path = selected_path
-            record.selected_size = int(selected["size"])
+            record.selected_video = {**selected, "piece_range": list(selected["piece_range"])}
             return {
                 "metadata_ready": True,
                 "video_file": selected,
@@ -676,10 +737,9 @@ class TorrentEngine:
     def _range_geometry(
         self, record: TorrentRecord, file_index: int, start: int, end: int
     ) -> tuple[Any, Any, int, int, int, int]:
-        info = self._torrent_info(record.handle)
+        info, storage = self._metadata(record)
         if info is None:
             raise TorrentEngineError("torrent metadata is not ready")
-        storage = self._file_storage(info)
         if file_index < 0 or file_index >= int(storage.num_files()):
             raise ValueError("invalid file index")
         file_size = max(0, int(storage.file_size(file_index)))
@@ -704,106 +764,87 @@ class TorrentEngine:
         end: int,
         lookahead_bytes: int,
         request_generation: Optional[int] = None,
+        probe: bool = False,
     ) -> tuple[int, int, bool, bool]:
         info, storage, file_size, piece_size, first_piece, requested_last = self._range_geometry(
             record, file_index, start, end
         )
         file_offset = max(0, int(storage.file_offset(file_index)))
-        lookahead_end = min(file_size - 1, end + max(0, lookahead_bytes))
-        window_last = (file_offset + lookahead_end) // piece_size
-
-        if request_generation is not None:
-            request_generation = max(1, int(request_generation))
-            if request_generation in record.cancelled_request_generations:
-                return first_piece, requested_last, False, True
-            if (
-                record.active_request_generation is not None
-                and request_generation < record.active_request_generation
-            ):
-                # A newer stream request has already taken ownership of the
-                # time-critical window. Never let an abandoned older HTTP GET
-                # pull libtorrent back to the pre-seek playback position.
-                return first_piece, requested_last, True, False
-            if record.active_request_generation is None:
-                record.active_request_generation = request_generation
-
+        superseded, cancelled = self._request_state(record, request_generation)
+        if superseded or cancelled:
+            return first_piece, requested_last, superseded, cancelled
         previous = record.deadline_window
         now = time.monotonic()
-        if previous is not None:
-            prev_first, prev_last = previous
-            far_from_previous = first_piece < prev_first - 2 or first_piece > prev_last + 2
-            if far_from_previous:
-                pending = record.pending_far_window
-                confirmed_far_request = (
-                    pending is not None
-                    and pending[0] - 2 <= first_piece <= pending[1] + 2
-                    and now - pending[2] <= 3.0
-                    and (
-                        request_generation is None
-                        or pending[3] == request_generation
-                    )
-                )
-                if confirmed_far_request:
-                    # A sustained request at a distant location is a real seek.
-                    # Promote this request generation before clearing deadlines.
-                    # Any older stream still blocked in a piece wait will then be
-                    # marked superseded instead of fighting the new seek window.
-                    try:
-                        record.handle.clear_piece_deadlines()
-                    except Exception:
-                        logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
-                    record.deadline_window = None
-                    record.pending_far_window = None
-                    if request_generation is not None:
-                        record.active_request_generation = request_generation
-                else:
-                    pending_generation = request_generation or 0
-                    record.pending_far_window = (
-                        first_piece,
-                        window_last,
-                        now,
-                        pending_generation,
-                    )
-            else:
-                # Do not let an older, still-alive playback GET erase a pending
-                # far seek from a newer request generation before it can be
-                # confirmed on the next scheduler pass.
-                pending = record.pending_far_window
-                preserve_newer_pending = (
-                    pending is not None
-                    and request_generation is not None
-                    and pending[3] > request_generation
-                )
-                if not preserve_newer_pending:
-                    record.pending_far_window = None
-                if request_generation is not None:
-                    active = record.active_request_generation or 0
-                    record.active_request_generation = max(active, request_generation)
+        # Preparation polling must not pull an established stream back to byte 0.
+        if request_generation is None and record.active_request_generation is not None:
+            return first_piece, requested_last, False, False
+        generation = request_generation or 0
+        far = previous is not None and (first_piece < previous[0] - 2 or first_piece > previous[1] + 2)
+        owner_gone = record.active_request_generation in record.cancelled_request_generations
+        pending = record.pending_far_window
+        sustained = pending is not None and pending[3] == generation and now - pending[2] <= 3 and (
+            (first_piece == pending[0] and now - pending[2] >= .5)
+            or pending[0] < first_piece <= pending[1] + 2)
+        temporary = previous is not None and not owner_gone and (probe or (far and not sustained))
+        if temporary:
+            # Container-header/index probes get only their requested pieces, not
+            # a second read-ahead window. They do not take playback ownership.
+            if not probe and (pending is None or now - pending[2] > 3 or generation > pending[3]):
+                record.pending_far_window = (first_piece, requested_last, now, generation)
+            record.probe_windows[generation] = (first_piece, requested_last, now + 3)
+            while len(record.probe_windows) > 4:
+                del record.probe_windows[min(record.probe_windows)]
+            if generation not in record.probe_windows:
+                return first_piece, requested_last, False, False
+            window_last = requested_last
+        else:
+            if far or owner_gone:
+                record.demand.reset()
+            if not probe:
+                record.demand.observe(start, now)
+            ahead = 0 if probe else record.demand.lookahead(min(max(0, lookahead_bytes), RANGE_LOOKAHEAD_BYTES), piece_size)
+            window_last = (file_offset + min(file_size - 1, end + ahead)) // piece_size
+            # Replace, rather than union with, the historical playback range.
+            record.deadline_window = (first_piece, window_last)
+            if request_generation is not None:
+                record.active_request_generation = request_generation
+            if pending and pending[3] <= generation:
+                record.pending_far_window = None
+            for old_generation in list(record.probe_windows):
+                if old_generation <= generation:
+                    del record.probe_windows[old_generation]
 
+        self._prune_deadlines(record, now)
         for piece in range(first_piece, window_last + 1):
             if record.handle.have_piece(piece):
                 continue
-            # Requested pieces are due immediately; lookahead pieces get
-            # progressively later deadlines so libtorrent can keep the pipe full
-            # without starving the current HTTP range.
-            distance = max(0, piece - requested_last)
-            deadline_ms = 0 if piece <= requested_last else distance * DEADLINE_STEP_MS
-            record.handle.set_piece_deadline(piece, int(deadline_ms))
-            try:
-                record.handle.piece_priority(piece, 7)
-            except Exception:
-                logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
-
-        if record.deadline_window is None:
-            record.deadline_window = (first_piece, window_last)
-        else:
-            prev_first, prev_last = record.deadline_window
-            if not (first_piece > prev_last + 2 or window_last < prev_first - 2):
-                record.deadline_window = (
-                    min(prev_first, first_piece),
-                    max(prev_last, window_last),
-                )
+            deadline_ms = 0 if piece <= requested_last else record.demand.deadline_ms((piece - requested_last) * piece_size)
+            due = now + deadline_ms / 1000
+            # Repeated polls must never postpone a deadline already in flight.
+            if due < record.piece_deadlines.get(piece, float("inf")):
+                record.handle.set_piece_deadline(piece, deadline_ms)
+                record.piece_deadlines[piece] = due
         return first_piece, requested_last, False, False
+
+    @staticmethod
+    def _request_state(record, generation):
+        cancelled = generation is not None and generation in record.cancelled_request_generations
+        superseded = generation is not None and record.active_request_generation is not None and generation < record.active_request_generation
+        return superseded, cancelled
+
+    @staticmethod
+    def _prune_deadlines(record, now):
+        for generation, probe in list(record.probe_windows.items()):
+            if probe[2] <= now or generation in record.cancelled_request_generations:
+                del record.probe_windows[generation]
+        primary = record.deadline_window if record.active_request_generation not in record.cancelled_request_generations else None
+        windows = [primary, *record.probe_windows.values()]
+        for piece in list(record.piece_deadlines):
+            if not any(window and window[0] <= piece <= window[1] for window in windows):
+                record.handle.reset_piece_deadline(piece)
+                del record.piece_deadlines[piece]
+            elif record.handle.have_piece(piece):
+                del record.piece_deadlines[piece]
 
     def range_status(
         self,
@@ -815,11 +856,14 @@ class TorrentEngine:
         schedule: bool = True,
         lookahead_bytes: int = RANGE_LOOKAHEAD_BYTES,
         request_generation: Optional[int] = None,
+        probe: bool = False,
+        allow_partial: bool = False,
     ) -> dict[str, Any]:
         with self._lock:
             record = self._record(info_hash)
+            superseded, cancelled = self._request_state(record, request_generation)
             try:
-                info, storage, _file_size, piece_size, first_piece, last_piece = self._range_geometry(
+                info, storage, file_size, piece_size, first_piece, last_piece = self._range_geometry(
                     record, file_index, start, end
                 )
             except TorrentEngineError:
@@ -829,17 +873,15 @@ class TorrentEngine:
                     "last_piece": None,
                     "missing_pieces": [],
                     "piece_size": 0,
-                    "waiting_for": "piece_geometry",
+                    "waiting_for": "cancelled" if cancelled else "superseded" if superseded else "piece_geometry",
                     "piece_states_available": 0,
                     "request_generation": request_generation,
                     "active_request_generation": record.active_request_generation,
-                    "superseded": False,
-                    "cancelled": False,
+                    "superseded": superseded,
+                    "cancelled": cancelled,
                 }
 
-            superseded = False
-            cancelled = False
-            if schedule:
+            if schedule and not superseded and not cancelled:
                 _first, _last, superseded, cancelled = self._schedule_deadlines(
                     record,
                     file_index,
@@ -847,6 +889,7 @@ class TorrentEngine:
                     end,
                     max(0, int(lookahead_bytes)),
                     request_generation=request_generation,
+                    probe=probe,
                 )
 
             missing = [
@@ -854,8 +897,13 @@ class TorrentEngine:
                 for piece in range(first_piece, last_piece + 1)
                 if not record.handle.have_piece(piece)
             ]
+            ready_end = min(end, file_size - 1)
+            if missing:
+                ready_end = min(ready_end, missing[0] * piece_size - int(storage.file_offset(file_index)) - 1)
+            ready = (not missing or (allow_partial and ready_end >= start)) and not superseded and not cancelled
             return {
-                "ready": not missing and not superseded and not cancelled,
+                "ready": ready,
+                "ready_end": ready_end if ready else None,
                 "first_piece": first_piece,
                 "last_piece": last_piece,
                 "missing_pieces": missing,
@@ -866,7 +914,7 @@ class TorrentEngine:
                     else "cancelled"
                     if cancelled
                     else None
-                    if not missing
+                    if ready
                     else "pieces"
                 ),
                 "piece_states_available": max(0, int(info.num_pieces())),
@@ -876,6 +924,7 @@ class TorrentEngine:
                 "active_request_generation": record.active_request_generation,
                 "superseded": superseded,
                 "cancelled": cancelled,
+                "pending_seek": bool(record.pending_far_window and record.pending_far_window[3] == request_generation),
             }
 
     async def wait_range(
@@ -887,6 +936,8 @@ class TorrentEngine:
         timeout_seconds: float,
         lookahead_bytes: int = RANGE_LOOKAHEAD_BYTES,
         request_generation: Optional[int] = None,
+        probe: bool = False,
+        allow_partial: bool = False,
     ) -> dict[str, Any]:
         deadline = asyncio.get_running_loop().time() + max(0.1, float(timeout_seconds))
         last_status: Optional[dict[str, Any]] = None
@@ -902,9 +953,11 @@ class TorrentEngine:
                 schedule=schedule,
                 lookahead_bytes=lookahead_bytes,
                 request_generation=request_generation,
+                probe=probe,
+                allow_partial=allow_partial,
             )
             if schedule:
-                reschedule_at = now + 2.0
+                reschedule_at = now + (0.25 if last_status.get("pending_seek") else 2.0)
             if last_status.get("superseded") or last_status.get("cancelled"):
                 return last_status
             if last_status.get("ready"):
@@ -930,6 +983,7 @@ class TorrentEngine:
             pending = record.pending_far_window
             if pending is not None and pending[3] == generation:
                 record.pending_far_window = None
+            self._prune_deadlines(record, time.monotonic())
             return {
                 "cancelled": True,
                 "request_generation": generation,
@@ -954,14 +1008,17 @@ class TorrentEngine:
                 return flag
         return None
 
-    def remove(self, info_hash: str, delete_files: bool = True) -> bool:
+    def remove(self, info_hash: str, delete_files: bool = True, owner_token: Optional[str] = None) -> bool:
         normalized = self._valid_hash(info_hash)
         if not normalized:
             return True
         with self._lock:
-            record = self._records.pop(normalized, None)
+            record = self._records.get(normalized)
             if record is None:
                 return True
+            if record.owner_token != owner_token:
+                raise TorrentBusyError("This release belongs to another playback session")
+            record.removing = True
             try:
                 record.handle.pause()
             except Exception:
@@ -972,12 +1029,26 @@ class TorrentEngine:
                 logger.debug("Ignored optional libtorrent operation failure", exc_info=True)
             try:
                 delete_flag = self._delete_files_flag() if delete_files else None
-                if delete_flag is not None:
+                if not record.handle.is_valid():
+                    pass
+                elif delete_flag is not None:
                     self._session.remove_torrent(record.handle, delete_flag)
                 else:
                     self._session.remove_torrent(record.handle)
             except Exception as exc:
                 logger.warning("remove_torrent(%s) raised: %s", normalized, exc)
+                return False
+
+            # Keep admission locked until native removal and directory cleanup finish.
+            return self._finish_remove(normalized, record, delete_files)
+
+    def _finish_remove(self, normalized: str, record: TorrentRecord, delete_files: bool) -> bool:
+        for _ in range(60):
+            if not record.handle.is_valid():
+                break
+            time.sleep(0.05)
+        else:
+            return False
 
         if delete_files:
             # libtorrent deletion is asynchronous. Repeating the managed-directory
@@ -991,17 +1062,16 @@ class TorrentEngine:
                         break
                 time.sleep(0.05)
 
-        verified = normalized not in self._records and (
-            not delete_files or not os.path.exists(record.save_path)
-        )
+        verified = not delete_files or not os.path.exists(record.save_path)
         if verified:
+            self._records.pop(normalized, None)
             logger.info("Removed torrent %s; files deleted=%s", normalized, delete_files)
         return verified
 
     def close(self) -> None:
         for info_hash in list(self._records):
             try:
-                self.remove(info_hash, delete_files=True)
+                self.remove(info_hash, delete_files=True, owner_token=self._records[info_hash].owner_token)
             except Exception as exc:
                 logger.warning("Could not remove %s during engine shutdown: %s", info_hash, exc)
         try:

@@ -13,7 +13,7 @@ import aiohttp
 from config import settings
 from services.catalog_policy import is_explicit_content, is_indian_production, recent_origin_allowed, recent_score
 from services.exceptions import DependencyUnavailableError
-from services.net_safety import read_response_limited
+from services.net_safety import read_json_limited, read_response_limited
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 TMDB_IMAGE = "https://image.tmdb.org/t/p"
@@ -175,12 +175,12 @@ class MetadataService:
                     if response.status == 404:
                         raise ValueError("TMDB item was not found")
                     if response.status != 200:
-                        detail = (await response.text()).strip()
+                        detail = (await read_response_limited(response, 4096)).decode('utf-8', errors='replace').strip()
                         suffix = f": {detail[:300]}" if detail else ""
                         raise DependencyUnavailableError(
                             "tmdb", f"request returned HTTP {response.status}{suffix}"
                         )
-                    payload = await response.json()
+                    payload = await read_json_limited(response)
         except (DependencyUnavailableError, ValueError):
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -1054,7 +1054,7 @@ class MetadataService:
         data = await cls._get(
             f"/tv/{int(tmdb_id)}",
             {
-                "append_to_response": "aggregate_credits,external_ids,images,alternative_titles",
+                "append_to_response": "aggregate_credits,external_ids,images,alternative_titles,content_ratings",
                 "include_image_language": "en,null",
                 "language": "en-US",
             },
@@ -1263,6 +1263,7 @@ class MetadataService:
             "imdb_id": external_ids.get("imdb_id"),
             "original_language": data.get("original_language") or None,
             "origin_country": origin_country,
+            "content_ratings": (data.get("content_ratings") or {}).get("results") or [],
             "status": data.get("status") or None,
             "number_of_seasons": int(data.get("number_of_seasons") or 0),
             "number_of_episodes": int(data.get("number_of_episodes") or 0),

@@ -12,6 +12,8 @@ const { createRuntimeController } = require('./runtime-controller')
 const { createSettingsController } = require('./settings-controller')
 const { createDesktopShell, registerAppScheme } = require('./desktop-shell')
 const { registerApplicationIpc } = require('./ipc-registration')
+const { LocalLibrary } = require('./local-library')
+const { registerLocalLibraryIpc } = require('./local-library-ipc')
 
 registerAppScheme()
 
@@ -40,6 +42,7 @@ const lifecycle = { quittingApp: false, quitCleanupComplete: false }
 let remoteGateway = null
 
 const appSettings = new AppSettingsStore(path.join(app.getPath('userData'), 'app-settings-v1.json'))
+const localLibrary = new LocalLibrary(path.join(app.getPath('userData'), 'local-library-v1.json'), backendJson)
 const keepWatching = new KeepWatchingStore(
   path.join(app.getPath('userData'), 'keep-watching-v1.json'),
   () => appSettings.get(),
@@ -55,9 +58,11 @@ const desktopShell = createDesktopShell({
 })
 
 const player = createPlayerSessionController({
+  localLibrary,
   backendBaseUrl: BACKEND_BASE_URL,
   backendJson,
   getAppSettings: () => appSettings.get(),
+  saveAppSettings: patch => appSettings.update(patch),
   getMainWindow: () => desktopShell.getMainWindow(),
   hardenRendererNavigation: desktopShell.hardenRendererNavigation,
   isDev,
@@ -224,6 +229,8 @@ const settingsController = createSettingsController({
   wslRuntime,
 })
 
+
+registerLocalLibraryIpc({ library: localLibrary, player, desktopShell, backendJson })
 
 registerApplicationIpc({
   appSettings,

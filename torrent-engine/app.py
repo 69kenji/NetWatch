@@ -5,11 +5,11 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Annotated, Optional
 
-from fastapi import FastAPI, HTTPException, Path as ApiPath
+from fastapi import FastAPI, Header, HTTPException, Path as ApiPath
 from pydantic import BaseModel, Field, field_validator, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from engine import TorrentEngine, TorrentEngineError, TorrentNotFoundError
+from engine import TorrentEngine, TorrentEngineError, TorrentNotFoundError, TorrentBusyError, TorrentCapacityError
 from http_security import BodySizeLimitMiddleware
 
 logging.basicConfig(level=logging.INFO)
@@ -25,6 +25,7 @@ InfoHash = Annotated[str, ApiPath(pattern=INFO_HASH_PATTERN)]
 
 
 class AddTorrentRequest(BaseModel):
+    owner_token: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{48}$")
     source: Optional[str] = Field(default=None, min_length=8, max_length=MAX_MAGNET_LENGTH)
     torrent_b64: Optional[str] = Field(default=None, min_length=4, max_length=MAX_TORRENT_B64_LENGTH)
     expected_hash: Optional[str] = Field(default=None, pattern=INFO_HASH_PATTERN)
@@ -60,6 +61,8 @@ class RangeRequest(BaseModel):
 
 class WaitRangeRequest(RangeRequest):
     timeout_seconds: float = Field(default=240.0, gt=0, le=900.0)
+    probe: bool = False
+    allow_partial: bool = False
 
 
 def get_engine() -> TorrentEngine:
@@ -69,6 +72,10 @@ def get_engine() -> TorrentEngine:
 
 
 def engine_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, TorrentBusyError):
+        return HTTPException(409, str(exc))
+    if isinstance(exc, TorrentCapacityError):
+        return HTTPException(429, str(exc))
     if isinstance(exc, TorrentNotFoundError):
         return HTTPException(404, "Torrent not found")
     if isinstance(exc, ValueError):
@@ -107,13 +114,13 @@ def list_torrents():
 def add_torrent(req: AddTorrentRequest):
     try:
         if req.source:
-            return get_engine().add_magnet(req.source, req.expected_hash, req.media_name)
+            return get_engine().add_magnet(req.source, req.expected_hash, req.media_name, req.owner_token)
         try:
             torrent_bytes = base64.b64decode(req.torrent_b64 or "", validate=True)
         except Exception as exc:
             raise ValueError("torrent_b64 is not valid base64") from exc
         return get_engine().add_torrent_bytes(
-            torrent_bytes, req.expected_hash, req.media_name
+            torrent_bytes, req.expected_hash, req.media_name, req.owner_token
         )
     except (TorrentEngineError, ValueError) as exc:
         raise engine_error(exc) from exc
@@ -162,7 +169,7 @@ def range_status(info_hash: InfoHash, req: RangeRequest):
 @app.post("/torrents/{info_hash}/wait-range")
 async def wait_range(info_hash: InfoHash, req: WaitRangeRequest):
     try:
-        kwargs = {"request_generation": req.request_generation}
+        kwargs = {"request_generation": req.request_generation, "probe": req.probe, "allow_partial": req.allow_partial}
         if req.lookahead_bytes is not None:
             kwargs["lookahead_bytes"] = req.lookahead_bytes
         return await get_engine().wait_range(
@@ -197,9 +204,10 @@ def reannounce(info_hash: InfoHash):
 
 
 @app.delete("/torrents/{info_hash}")
-def remove_torrent(info_hash: InfoHash, delete_files: bool = True):
+def remove_torrent(info_hash: InfoHash, delete_files: bool = True,
+                   owner_token: Annotated[Optional[str], Header(alias="X-NetWatch-Owner", pattern=r"^[0-9a-f]{48}$")] = None):
     try:
-        verified_absent = get_engine().remove(info_hash, delete_files=delete_files)
+        verified_absent = get_engine().remove(info_hash, delete_files=delete_files, owner_token=owner_token)
     except (TorrentEngineError, ValueError) as exc:
         raise engine_error(exc) from exc
     if not verified_absent:

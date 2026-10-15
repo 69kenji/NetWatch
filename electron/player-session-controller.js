@@ -1,9 +1,15 @@
 'use strict'
 
+const crypto = require('crypto')
 const { MpvController } = require('./mpv-controller')
 const { createPlayerProgressController } = require('./player-progress-controller')
 const { createPlayerSubtitleController } = require('./player-subtitle-controller')
 const { createPlayerWindowManager } = require('./player-window-manager')
+const { createPlayerAudioPreferences } = require('./player-audio-preferences')
+const { createPlayerEpisodeController } = require('./player-episode-controller')
+const { playbackDuration, withFileTimings } = require('./player-episode-timing')
+const { normalizePlaybackPreferences, PLAYBACK_DEFAULTS } = require('../shared/playback-preferences.mjs')
+const { playbackProperties } = require('./player-playback-preferences')
 const { METADATA_PREPARATION_TIMEOUT_MS, metadataPreparationTimedOut } = require('./preparation-policy')
 
 const PREPARATION_POLL_MS = 400
@@ -14,11 +20,13 @@ function createPlayerSessionController({
   backendBaseUrl,
   backendJson,
   getAppSettings,
+  saveAppSettings,
   getMainWindow,
   hardenRendererNavigation,
   isDev,
   keepWatching,
   lifecycle,
+  localLibrary = null,
   onQuitReady,
   playerRendererUrl,
   shouldMinimizeToTray,
@@ -26,6 +34,7 @@ function createPlayerSessionController({
   if (
     typeof backendJson !== 'function' ||
     typeof getAppSettings !== 'function' ||
+    typeof saveAppSettings !== 'function' ||
     typeof getMainWindow !== 'function' ||
     typeof shouldMinimizeToTray !== 'function'
   ) {
@@ -37,9 +46,18 @@ function createPlayerSessionController({
   let playerPreparation = defaultPlayerPreparation()
   let playerPreparationGeneration = 0
   let closingPlayer = false
+  let openingPlayer = false
+  let nextEpisodePromise = null
+  let nextEpisodeAbort = null
+  let episodeInfoCache = null
+  let preferenceQueue = Promise.resolve()
+  let localStartupPromise = null
+  const torrentOwners = new Map()
 
   const progress = createPlayerProgressController({ getAppSettings, keepWatching, mpv })
   const subtitles = createPlayerSubtitleController({ backendBaseUrl, backendJson, mpv })
+  const audioPreferences = createPlayerAudioPreferences({ getAppSettings, saveAppSettings })
+  const episodes = createPlayerEpisodeController({ backendJson, getAppSettings })
   const windows = createPlayerWindowManager({
     getMainWindow,
     hardenRendererNavigation,
@@ -98,20 +116,10 @@ function createPlayerSessionController({
     return { ...playerPreparation }
   }
   
-  function extractBtih(source) {
-    if (typeof source !== 'string' || !source.toLowerCase().startsWith('magnet:?')) return null
-    try {
-      const url = new URL(source)
-      for (const value of url.searchParams.getAll('xt')) {
-        const match = /^urn:btih:([0-9a-f]{40})$/iu.exec(value.trim())
-        if (match) return match[1].toLowerCase()
-      }
-    } catch (_) {}
-    return null
-  }
   
-  async function deleteTorrentAndData(infoHash) {
+  async function deleteTorrentAndData(infoHash, ownerToken = torrentOwners.get(String(infoHash).toLowerCase())) {
     if (typeof infoHash !== 'string' || !infoHash.trim()) return true
+    if (!ownerToken) return true
   
     const normalized = infoHash.trim().toLowerCase()
     let lastError = null
@@ -120,16 +128,20 @@ function createPlayerSessionController({
       try {
         const payload = await backendJson(
           `/api/torrents/${encodeURIComponent(normalized)}?delete_files=true`,
-          { method: 'DELETE' },
+          { method: 'DELETE', headers: { 'X-NetWatch-Owner': ownerToken } },
           5000,
         )
         if (payload?.removed === true && payload?.verified_absent === true) {
+          if (torrentOwners.get(normalized) === ownerToken) torrentOwners.delete(normalized)
           console.log(`[Player cleanup] Removed torrent ${normalized} and its data`)
           return true
         }
         throw new Error(`torrent cleanup was not verified for ${normalized}`)
       } catch (error) {
-        if (error?.status === 404) return true
+        if (error?.status === 404 || error?.status === 409) {
+          if (torrentOwners.get(normalized) === ownerToken) torrentOwners.delete(normalized)
+          return true
+        }
         lastError = error
         if (attempt < 3) {
           await new Promise(resolve => setTimeout(resolve, attempt * 250))
@@ -257,7 +269,7 @@ function createPlayerSessionController({
           const videoWindow = windows.getVideoWindow()
           if (!videoWindow || videoWindow.isDestroyed()) return
           try {
-            await mpv.start(videoWindow, source)
+            await mpv.start(videoWindow, source, { ...getAppSettings(), ...audioPreferences.get() })
             await progress.applyResume(playerSession)
           } catch (error) {
             if (!preparationIsCurrent(generation, infoHash)) return
@@ -323,17 +335,18 @@ function createPlayerSessionController({
   
   async function runTorrentAddAndPreparation(payload, generation) {
     const releaseRef = typeof payload.releaseRef === 'string' ? payload.releaseRef.trim() : ''
-    const torrentSource = typeof payload.torrentSource === 'string' ? payload.torrentSource.trim() : ''
     const mediaName = payload.mediaName || payload.title || 'NetWatch media'
-    const expectedHash = payload.expectedHash || (torrentSource ? extractBtih(torrentSource) : null) || null
+    const expectedHash = payload.expectedHash || null
+    const ownerToken = crypto.randomBytes(24).toString('hex')
+    let acquiredHash = null
   
     try {
       const addPayload = {
         media_name: mediaName,
         expected_hash: expectedHash,
+        release_ref: releaseRef,
+        owner_token: ownerToken,
       }
-      if (releaseRef) addPayload.release_ref = releaseRef
-      else addPayload.magnet = torrentSource
   
       const added = await backendJson('/api/torrents/add', {
         method: 'POST',
@@ -343,11 +356,13 @@ function createPlayerSessionController({
   
       const infoHash = typeof added?.hash === 'string' ? added.hash.toLowerCase() : null
       if (!infoHash) throw new Error('Backend did not return a torrent hash')
+      acquiredHash = infoHash
   
       if (!preparationIsCurrent(generation)) {
-        await deleteTorrentAndData(infoHash).catch(error => console.error('[Player cleanup]', error))
+        await deleteTorrentAndData(infoHash, ownerToken).catch(error => console.error('[Player cleanup]', error))
         return
       }
+      torrentOwners.set(infoHash, ownerToken)
   
       const source = `${backendBaseUrl}/api/torrents/stream/${encodeURIComponent(infoHash)}`
       playerSession = {
@@ -366,14 +381,13 @@ function createPlayerSessionController({
   
       await monitorTorrentPreparation(infoHash, source, generation)
     } catch (error) {
-      if (!preparationIsCurrent(generation)) return
-  
-      const cleanupHash = playerSession?.infoHash || expectedHash
+      const cleanupHash = acquiredHash || expectedHash
       if (cleanupHash) {
-        await deleteTorrentAndData(cleanupHash).catch(cleanupError => {
+        await deleteTorrentAndData(cleanupHash, ownerToken).catch(cleanupError => {
           console.error('[Player cleanup after preparation failure]', cleanupError)
         })
       }
+      if (!preparationIsCurrent(generation)) return
   
       setPlayerPreparation({
         stage: 'error',
@@ -385,17 +399,29 @@ function createPlayerSessionController({
   }
   
   async function openPreparingPlayerSession(payload) {
-    if (playerSession) throw new Error('A player session is already open')
-    await windows.create()
-    await mpv.stop({ graceful: false })
-  
+    if (playerSession || closingPlayer || openingPlayer || nextEpisodePromise) throw new Error('A player session is already open')
+    openingPlayer = true
+    const generation = playerPreparationGeneration
+    try {
+      await windows.create()
+      await mpv.stop({ graceful: false })
+      if (generation !== playerPreparationGeneration || lifecycle.quittingApp) throw new Error('Player opening was cancelled')
+      return beginPreparingSession(payload)
+    } catch (error) {
+      if (!playerSession) windows.destroy()
+      throw error
+    } finally { openingPlayer = false }
+  }
+
+  function beginPreparingSession(payload, { reuseWindow = false } = {}) {
     const generation = ++playerPreparationGeneration
     progress.reset()
-    const directSource = typeof payload.torrentSource === 'string' ? payload.torrentSource : ''
-    const expectedHash = payload.infoHash || payload.expectedHash || (directSource ? extractBtih(directSource) : null) || null
+    const expectedHash = payload.infoHash || payload.expectedHash || null
   
     playerSession = {
       source: payload.source || null,
+      localFileId: payload.localFileId || null,
+      localEpisode: payload.localEpisode === true,
       title: payload.title || null,
       infoHash: expectedHash,
       filePath: payload.filePath || null,
@@ -409,26 +435,26 @@ function createPlayerSessionController({
   
     playerPreparation = defaultPlayerPreparation()
     setPlayerPreparation({
-      stage: payload.infoHash ? 'metadata' : 'adding',
+      stage: payload.localFileId ? 'starting' : payload.infoHash ? 'metadata' : 'adding',
       ready: false,
-      message: payload.infoHash ? 'Checking stream readiness…' : 'Adding torrent…',
+      message: payload.localFileId ? 'Opening file…' : payload.infoHash ? 'Checking stream readiness…' : 'Adding torrent…',
       infoHash: expectedHash,
     })
   
     windows.setTitle(playerSession.title)
     sendToPlayerRenderer('player:session', playerSession)
-    windows.showShell()
+    if (reuseWindow) windows.showOverlay()
+    else windows.showShell()
     return generation
   }
   
-  async function openTorrentSession(payload, { allowDirectSource = false } = {}) {
+  async function openTorrentSession(payload) {
     const releaseRef = typeof payload?.releaseRef === 'string' ? payload.releaseRef.trim() : ''
-    const torrentSource = typeof payload?.torrentSource === 'string' ? payload.torrentSource.trim() : ''
-    if (!releaseRef && !(allowDirectSource && torrentSource.toLowerCase().startsWith('magnet:?'))) {
+    if (!/^[A-Za-z0-9_-]{32,128}$/u.test(releaseRef)) {
       throw new Error('player.openTorrent requires a backend-issued release reference')
     }
   
-    const normalizedPayload = { ...payload, releaseRef, torrentSource: allowDirectSource ? torrentSource : '' }
+    const normalizedPayload = { ...payload, releaseRef, localFileId: null, localEpisode: false, source: null }
     const generation = await openPreparingPlayerSession(normalizedPayload)
     void runTorrentAddAndPreparation(normalizedPayload, generation)
     return {
@@ -437,82 +463,70 @@ function createPlayerSessionController({
       preparation: { ...playerPreparation },
     }
   }
-  
-  async function openExistingTorrentSession(payload) {
-    if (!payload || typeof payload.source !== 'string' || !payload.source.trim()) {
-      throw new Error('Existing torrent playback requires a stream source')
-    }
-    if (!payload.infoHash) throw new Error('Existing torrent playback requires an info hash')
-  
-    const generation = await openPreparingPlayerSession(payload)
-    void monitorTorrentPreparation(payload.infoHash.toLowerCase(), payload.source, generation)
+
+  function localPayload(item) {
+    const match = item.match
     return {
-      session: playerSession,
-      state: mpv.getState(),
-      preparation: { ...playerPreparation },
+      localFileId: item.id,
+      localEpisode: match ? match.type === 'tv' : Boolean(item.episode),
+      source: item.absolutePath,
+      filePath: item.absolutePath,
+      title: match ? `${match.title}${match.type === 'tv' ? ` · S${match.season}E${match.episode}` : ''}` : item.filename,
+      mediaItem: match ? { ...match, tmdb_id: match.id, overview: '', rating: 0 } : null,
     }
   }
-  
-  async function openPlayerSession(payload) {
-    if (!payload || typeof payload.source !== 'string' || !payload.source.trim()) {
-      throw new Error('player.open requires a non-empty source')
-    }
-    if (playerSession) throw new Error('A player session is already open')
-  
-    await windows.create()
-    progress.reset()
-    ++playerPreparationGeneration
-    playerPreparation = defaultPlayerPreparation()
-    setPlayerPreparation({ stage: 'ready', ready: true, message: 'Playing' })
-  
-    playerSession = {
-      source: payload.source,
-      title: payload.title || null,
-      infoHash: payload.infoHash || null,
-      filePath: payload.filePath || null,
-      mediaItem: payload.mediaItem || null,
-      resumePositionSeconds: Number.isFinite(Number(payload.resumePositionSeconds))
-        ? Math.max(0, Math.min(7 * 24 * 60 * 60, Number(payload.resumePositionSeconds)))
-        : 0,
-      resumePending: Number(payload.resumePositionSeconds) > 0,
-      openedAt: new Date().toISOString(),
-    }
-  
-    windows.setTitle(playerSession.title)
-    if (getMainWindow() && !getMainWindow().isDestroyed()) getMainWindow().hide()
-    windows.syncBounds()
-    sendToPlayerRenderer('player:session', playerSession)
-  
+
+  async function startLocalPlayback(payload, generation) {
+    if (!preparationIsCurrent(generation)) return
+    setPlayerPreparation({ stage: 'starting', ready: false, message: 'Opening file…', error: null })
     try {
-      windows.showVideoFromLaunchState()
-      await new Promise(resolve => setTimeout(resolve, 100))
-      await mpv.start(windows.getVideoWindow(), payload.source)
-      await progress.applyResume(playerSession)
-  
+      // Revalidate immediately before handing a local path to mpv.
+      const item = await localLibrary.resolve(payload.localFileId)
+      if (!preparationIsCurrent(generation)) return
+      const startup = mpv.start(windows.getVideoWindow(), item.absolutePath, { ...getAppSettings(), ...audioPreferences.get() })
+      localStartupPromise = startup
+      try { await startup }
+      finally { if (localStartupPromise === startup) localStartupPromise = null }
+      if (!preparationIsCurrent(generation)) { await mpv.stop({ graceful: false }); return }
       windows.showOverlay()
-  
-      return { session: playerSession, state: mpv.getState(), preparation: { ...playerPreparation } }
+      setPlayerPreparation({ stage: 'ready', ready: true, message: 'Playing', error: null })
     } catch (error) {
-      sendToPlayerRenderer('player:state', {
-        ...mpv.getState(),
-        status: 'error',
-        error: error.message,
-      })
-      throw error
+      if (!preparationIsCurrent(generation)) return
+      await mpv.stop({ graceful: false }).catch(() => {})
+      if (preparationIsCurrent(generation)) setPlayerPreparation({ stage: 'error', ready: false, message: 'File could not start', error: error.message })
     }
   }
-  
+
+  async function openLocal(id) {
+    if (!localLibrary) throw new Error('Local library is unavailable')
+    const payload = localPayload(await localLibrary.resolve(id))
+    const generation = await openPreparingPlayerSession(payload)
+    void startLocalPlayback(payload, generation)
+    return { session: playerSession }
+  }
+
   async function closePlayerSession({ restoreMainWindow = true } = {}) {
     if (closingPlayer) return
     closingPlayer = true
+    nextEpisodeAbort?.abort()
     ++playerPreparationGeneration
     const closingSession = playerSession
   
     try {
       progress.checkpointDesktop(playerSession, mpv.getState(), { force: true })
       windows.hide()
+      // Cancel a pending next-episode lookup/handoff before touching its resources.
+      // The handoff checks its generation after every await and cannot reopen us.
+      if (nextEpisodePromise) await nextEpisodePromise.catch(() => {})
+      await audioPreferences.settle()
+      await preferenceQueue
   
       await mpv.stop()
+      if (localStartupPromise) {
+        // Keep new sessions blocked until a cancelled startup has settled.
+        await localStartupPromise.catch(() => {})
+        await mpv.stop({ graceful: false })
+      }
   
       await subtitles.releaseActive()
   
@@ -555,6 +569,98 @@ function createPlayerSessionController({
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide()
     await closePlayerSession({ restoreMainWindow: false })
   }
+
+  function requireSession(openedAt) {
+    if (closingPlayer || !playerSession || typeof openedAt !== 'string' || playerSession.openedAt !== openedAt) {
+      throw new Error('Player session is closed')
+    }
+    return playerSession
+  }
+
+  async function episodeInfo(openedAt) {
+    const session = requireSession(openedAt)
+    const duration = playbackDuration(mpv.getState())
+    if (episodeInfoCache?.openedAt !== openedAt || episodeInfoCache.duration !== duration) {
+      // Chapters remain usable even if an optional metadata service is down.
+      const empty = {
+        genres: [], rating: null, guidance: [], guidance_scope: 'series',
+        alwaysSkipIntro: getAppSettings().alwaysSkipIntro === true,
+      }
+      const promise = (session.localFileId && !session.mediaItem
+        ? Promise.resolve(empty) : episodes.info(session, duration)).catch(() => empty)
+      episodeInfoCache = { openedAt, duration, promise }
+    }
+    const result = await episodeInfoCache.promise
+    requireSession(openedAt)
+    return withFileTimings(result, mpv.getState())
+  }
+
+  async function nextEpisodeInfo(openedAt) {
+    const session = requireSession(openedAt)
+    const item = session.localFileId ? await localLibrary.next(session.localFileId) : null
+    const episode = item?.match || item?.episode
+    const result = session.localFileId ? (item && episode ? {
+      season_number: episode.season, episode_number: episode.episode, name: item.match?.episode_title || item.filename,
+    } : null) : await episodes.successor(session)
+    requireSession(openedAt)
+    return result
+  }
+
+  function playNextEpisode(openedAt) {
+    const previous = requireSession(openedAt)
+    if (nextEpisodePromise) return nextEpisodePromise
+    if (!playerPreparation.ready) throw new Error('Wait for playback to be ready')
+    nextEpisodeAbort = new AbortController()
+    let generation = playerPreparationGeneration
+    const assertCurrent = () => {
+      requireSession(openedAt)
+      if (generation !== playerPreparationGeneration) throw new Error('Playback changed')
+    }
+    nextEpisodePromise = (async () => {
+      const nextLocal = previous.localFileId ? await localLibrary.next(previous.localFileId) : null
+      if (previous.localFileId && !nextLocal) throw new Error('The next episode is not available in your library.')
+      const payload = nextLocal ? localPayload(nextLocal) : await episodes.resolveNext(previous, assertCurrent, nextEpisodeAbort.signal)
+      assertCurrent()
+      progress.checkpointDesktop(playerSession, mpv.getState(), { force: true })
+      generation = ++playerPreparationGeneration
+      setPlayerPreparation({ stage: 'adding', ready: false, message: 'Preparing next episode…', error: null })
+      try {
+        await audioPreferences.settle()
+        await preferenceQueue
+        assertCurrent()
+        await mpv.stop()
+        assertCurrent()
+        await subtitles.releaseActive()
+        assertCurrent()
+        await deleteTorrentAndData(previous.infoHash)
+        assertCurrent()
+        // Reuse both windows so fullscreen and the overlay survive the handoff.
+        const nextGeneration = beginPreparingSession(payload, { reuseWindow: true })
+        if (payload.localFileId) void startLocalPlayback(payload, nextGeneration)
+        else void runTorrentAddAndPreparation(payload, nextGeneration)
+        return { session: playerSession }
+      } catch (error) {
+        if (!closingPlayer && generation === playerPreparationGeneration) {
+          setPlayerPreparation({ stage: 'error', ready: false, message: 'Next episode could not start', error: error.message })
+        }
+        throw error
+      }
+    })().finally(() => { nextEpisodePromise = null; nextEpisodeAbort = null })
+    return nextEpisodePromise
+  }
+
+  async function skipIntro(openedAt) {
+    const info = await episodeInfo(openedAt)
+    requireSession(openedAt)
+    const { position, duration, seeking, seekBuffering, pausedForCache } = mpv.getState()
+    const intro = info?.intro
+    if (seeking || seekBuffering || pausedForCache || !intro || !Number.isFinite(intro.start) || !Number.isFinite(intro.end) ||
+        intro.start < 0 || intro.end <= intro.start || intro.end - intro.start > 300 ||
+        !Number.isFinite(duration) || intro.end >= duration ||
+        !Number.isFinite(position) || position < intro.start || position >= intro.end || !playerPreparation.ready) return false
+    await mpv.execute({ type: 'seekAbsolute', seconds: intro.end })
+    return true
+  }
   
   async function quitAppFromPlayer() {
     if (lifecycle.quittingApp || lifecycle.quitCleanupComplete) return
@@ -578,15 +684,67 @@ function createPlayerSessionController({
 
   function stopImmediately() {
     closingPlayer = true
+    nextEpisodeAbort?.abort()
+    audioPreferences.flush()
     return mpv.stop({ graceful: false })
   }
 
+  function updatePreferences(patch) {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch) ||
+        Object.keys(patch).some(key => !Object.hasOwn(PLAYBACK_DEFAULTS, key))) return Promise.reject(new Error('Invalid playback preferences'))
+    const openedAt = playerSession?.openedAt
+    const generation = playerPreparationGeneration
+    const assertCurrent = () => {
+      requireSession(openedAt)
+      if (generation !== playerPreparationGeneration || !playerPreparation.ready) throw new Error('Playback changed')
+    }
+    const task = preferenceQueue.then(async () => {
+      assertCurrent()
+      const previous = normalizePlaybackPreferences(getAppSettings())
+      const settings = normalizePlaybackPreferences(patch, previous)
+      if (Object.entries(patch).some(([key, value]) => settings[key] !== value)) throw new Error('Invalid playback preference value')
+      const oldProperties = playbackProperties(previous)
+      const changed = Object.entries(playbackProperties(settings)).filter(([key, value]) => oldProperties[key] !== value)
+      try {
+        for (const [name, value] of changed) {
+          assertCurrent()
+          await mpv.request(['set_property', name, value])
+        }
+        assertCurrent()
+        saveAppSettings(patch)
+        return normalizePlaybackPreferences(getAppSettings())
+      } catch (error) {
+        // A failed live update must not leave half of a preference applied.
+        for (const [name] of changed) {
+          try { assertCurrent(); await mpv.request(['set_property', name, oldProperties[name]]) }
+          catch { break }
+        }
+        throw error
+      }
+    })
+    preferenceQueue = task.catch(() => {})
+    return task
+  }
+
   return {
+    getPreferences: () => normalizePlaybackPreferences(getAppSettings()),
+    updatePreferences,
     checkpointRemotePlayback: progress.checkpointRemote,
     close: closePlayerSession,
-    execute: subtitles.execute,
+    execute: action => {
+      if (action?.type !== 'setVolume' && action?.type !== 'setMute') return subtitles.execute(action)
+      const session = playerSession
+      return audioPreferences.execute(action, command => {
+        if (!session || session.openedAt !== playerSession?.openedAt || closingPlayer) throw new Error('Player session is closed')
+        return subtitles.execute(command)
+      })
+    },
     foreground: windows.foreground,
     getPreparation: () => ({ ...playerPreparation }),
+    getEpisodeInfo: episodeInfo,
+    getNextEpisode: nextEpisodeInfo,
+    playNextEpisode,
+    skipIntro,
     getOverlayWindow: windows.getOverlayWindow,
     getSession: () => playerSession,
     getState: () => mpv.getState(),
@@ -594,9 +752,10 @@ function createPlayerSessionController({
     hasSession: () => Boolean(playerSession),
     isClosing: () => closingPlayer,
     isTorrentInUse: infoHash => Boolean(
-      playerSession?.infoHash && String(playerSession.infoHash).toLowerCase() === String(infoHash).toLowerCase()
+      torrentOwners.has(String(infoHash).toLowerCase())
     ),
     openTorrent: openTorrentSession,
+    openLocal,
     setFullscreen: windows.setFullscreen,
     stopImmediately,
     toggleFullscreen: windows.toggleFullscreen,

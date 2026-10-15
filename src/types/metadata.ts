@@ -159,5 +159,6 @@ export function toSeriesMediaItem(series: TmdbSeriesDetails, episode: TmdbEpisod
     season: episode.season_number,
     episode: episode.episode_number,
     episode_title: episode.name,
+    is_anime: series.is_anime === true,
   }
 }

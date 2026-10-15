@@ -1,4 +1,4 @@
-import { Compass, Home, Settings, WarningTriangle, RefreshCircle, Check } from 'iconoir-react'
+import { Compass, Home, Folder, Settings, WarningTriangle, RefreshCircle, Check } from 'iconoir-react'
 import type { NetWatchView } from '../types/torrents'
 
 type SidebarProps = {
@@ -35,6 +35,10 @@ export function Sidebar({ view, runtime, runtimeOpen, onNavigate, onRuntimeClick
         </button>
 
         <span className="nw-sidebar__divider" />
+        <button className={`nw-nav-button ${view === 'library' ? 'is-active' : ''}`} onClick={() => onNavigate('library')}
+          data-tooltip="Library" aria-label="Library" aria-current={view === 'library' ? 'page' : undefined}>
+          <Folder width={21} height={21} />
+        </button>
         <button
           className={`nw-nav-button ${view === 'settings' ? 'is-active' : ''}`}
           onClick={() => onNavigate('settings')}

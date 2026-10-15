@@ -153,11 +153,20 @@ async def read_response_limited(response: aiohttp.ClientResponse, max_bytes: int
 
     content_length = response.content_length
     if content_length is not None and content_length > max_bytes:
+        response.close()
         raise ValueError("Response exceeds the size limit")
 
     payload = bytearray()
     async for chunk in response.content.iter_chunked(min(64 * 1024, max_bytes + 1)):
         if len(payload) + len(chunk) > max_bytes:
+            response.close()
             raise ValueError("Response exceeds the size limit")
         payload.extend(chunk)
     return bytes(payload)
+
+
+async def read_json_limited(response: aiohttp.ClientResponse, max_bytes: int = 8 * 1024 * 1024):
+    """Bound decoded JSON, including error responses, before parsing."""
+    import json
+
+    return json.loads(await read_response_limited(response, max_bytes))
