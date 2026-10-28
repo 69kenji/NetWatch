@@ -23,9 +23,9 @@ from services.torrent_engine import (
 )
 
 router = APIRouter()
-STARTUP_PREFIX_MIN_BYTES = 512 * 1024
-STARTUP_PREFIX_MAX_BYTES = 2 * 1024 * 1024
-STARTUP_PREFIX_PIECES = 1
+STARTUP_PREFIX_MIN_BYTES = 2 * 1024 * 1024
+STARTUP_PREFIX_MAX_BYTES = 4 * 1024 * 1024
+STARTUP_PREFIX_PIECES = 2
 STREAM_INITIAL_CHUNK_BYTES = 512 * 1024
 STREAM_CHUNK_BYTES = 4 * 1024 * 1024
 STREAM_RANGE_WAIT_SECONDS = 240.0
@@ -82,12 +82,23 @@ async def _wait_for_stream_range(
                 {wait_task}, timeout=STREAM_DISCONNECT_POLL_SECONDS
             )
             if done:
-                status = await wait_task
+                try:
+                    status = await wait_task
+                except RangeRequestSupersededError:
+                    # A newer seek owns read-ahead, but this connected response
+                    # still owes its advertised bytes. Finish through bounded
+                    # probes without taking playback ownership back.
+                    if probe:
+                        raise
+                    return await _wait_for_stream_range(
+                        request, info_hash, video_file, start, end,
+                        request_generation, probe=True,
+                    )
                 ready_end = status.get("ready_end") if isinstance(status, dict) else None
                 if (not isinstance(status, dict) or status.get("ready") is not True
                         or type(ready_end) is not int or not start <= ready_end <= end):
                     raise DependencyUnavailableError("torrent-engine", "Invalid verified byte range")
-                return status
+                return {**status, "stream_probe": probe}
             if await request.is_disconnected():
                 raise StreamClientDisconnected
     except (asyncio.CancelledError, Exception):
@@ -103,6 +114,7 @@ InfoHash = Annotated[str, ApiPath(pattern=INFO_HASH_PATTERN)]
 RELEASE_REF_PATTERN = r"^[A-Za-z0-9_-]{32,128}$"
 RESOLUTION_FILTERS = {"2160p", "1080p", "720p", "480p"}
 MAX_MAGNET_LENGTH = 16 * 1024
+MAX_TORRENT_URL_LENGTH = 4096
 
 
 class AddTorrentRequest(BaseModel):
@@ -112,10 +124,11 @@ class AddTorrentRequest(BaseModel):
     # are intentionally forbidden here. Provider URLs must arrive through an
     # opaque release_ref so credentials never need to cross into the renderer.
     magnet: Optional[str] = Field(default=None, min_length=8, max_length=MAX_MAGNET_LENGTH)
+    torrent_url: Optional[str] = Field(default=None, min_length=9, max_length=MAX_TORRENT_URL_LENGTH)
     media_name: str = Field(min_length=1, max_length=240)
     expected_hash: Optional[str] = Field(default=None, pattern=INFO_HASH_PATTERN)
 
-    @field_validator("release_ref", "magnet", "media_name", mode="before")
+    @field_validator("release_ref", "magnet", "torrent_url", "media_name", mode="before")
     @classmethod
     def _strip_strings(cls, value):
         return value.strip() if isinstance(value, str) else value
@@ -127,10 +140,12 @@ class AddTorrentRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_source(self):
-        if bool(self.release_ref) == bool(self.magnet):
-            raise ValueError("exactly one of release_ref or magnet is required")
+        if sum(bool(value) for value in (self.release_ref, self.magnet, self.torrent_url)) != 1:
+            raise ValueError("exactly one torrent source is required")
         if self.magnet and not self.magnet.lower().startswith("magnet:?"):
             raise ValueError("direct torrent sources must be magnet URIs")
+        if self.torrent_url and not self.torrent_url.lower().startswith("https://"):
+            raise ValueError("torrent download URLs must use HTTPS")
         return self
 
 
@@ -180,7 +195,7 @@ async def search_torrents(req: SearchRequest):
 async def add_torrent(req: AddTorrentRequest):
     release_ref = req.release_ref
     try:
-        source = req.magnet
+        source = req.magnet or req.torrent_url
         expected_hash = req.expected_hash
         if release_ref:
             stored = ReleaseReferenceStore.resolve(release_ref)
@@ -199,10 +214,9 @@ async def add_torrent(req: AddTorrentRequest):
                 source, req.media_name, expected_hash=expected_hash, owner_token=req.owner_token
             )
         else:
-            # Only opaque backend-issued references may resolve provider HTTP URLs.
-            if not release_ref:
-                raise HTTPException(400, "HTTP torrent sources require a release_ref")
-            resolved = await ProwlarrService.resolve_torrent_source(source)
+            resolved = await ProwlarrService.resolve_torrent_source(
+                source, public_only=bool(req.torrent_url)
+            )
 
             if resolved["source_type"] == "magnet":
                 added = await TorrentEngineService.add_torrent(
@@ -211,7 +225,7 @@ async def add_torrent(req: AddTorrentRequest):
                     expected_hash=expected_hash,
                     owner_token=req.owner_token,
                 )
-                added["source_resolution"] = "prowlarr_redirect_to_magnet"
+                added["source_resolution"] = "direct_redirect_to_magnet" if req.torrent_url else "prowlarr_redirect_to_magnet"
             else:
                 added = await TorrentEngineService.add_torrent_file(
                     resolved["torrent_bytes"],
@@ -219,7 +233,7 @@ async def add_torrent(req: AddTorrentRequest):
                     expected_hash=expected_hash,
                     owner_token=req.owner_token,
                 )
-                added["source_resolution"] = "prowlarr_torrent_file"
+                added["source_resolution"] = "direct_torrent_file" if req.torrent_url else "prowlarr_torrent_file"
 
         if release_ref:
             # Consume only after the source has been successfully accepted so a
@@ -287,7 +301,9 @@ def startup_prefix_target_bytes(video_file: dict) -> int:
     piece_size = max(0, int(video_file.get("piece_size") or 0))
     piece_target = piece_size * STARTUP_PREFIX_PIECES if piece_size > 0 else 0
     target = max(STARTUP_PREFIX_MIN_BYTES, piece_target)
-    target = min(target, STARTUP_PREFIX_MAX_BYTES)
+    # Very large torrent pieces still need two verified pieces; the usual
+    # 2–4 MiB target must not silently weaken that safety margin.
+    target = max(piece_target, min(target, STARTUP_PREFIX_MAX_BYTES))
     return min(file_size, target)
 
 
@@ -553,6 +569,7 @@ async def stream_file(info_hash: InfoHash, request: Request):
     async def iter_file():
         cursor = start
         first_window = True
+        probe_mode = probe
         chunk_bytes = STREAM_INITIAL_CHUNK_BYTES
         try:
             async with aiofiles.open(file_path, "rb") as file_handle:
@@ -572,24 +589,19 @@ async def stream_file(info_hash: InfoHash, request: Request):
                                 cursor,
                                 chunk_end,
                                 request_generation,
-                                probe=probe,
+                                probe=probe_mode,
                             )
-                        except (
-                            StreamClientDisconnected,
-                            RangeRequestSupersededError,
-                            RangeRequestCancelledError,
-                            TimeoutError,
-                            DependencyUnavailableError,
-                        ):
-                            # End the old transfer cleanly. mpv's newer Range GET
-                            # owns scheduling after a seek and can retry normally.
+                        except StreamClientDisconnected:
                             break
+                    # Terminal failures propagate and abort the transport. Never
+                    # report a successful EOF with fewer bytes than promised.
+                    probe_mode = bool(status.get("stream_probe", probe_mode))
                     first_window = False
                     # The engine may release only a verified prefix. Never read
                     # beyond that boundary, even when later sparse bytes exist.
                     ready_end = status.get("ready_end")
                     if not status.get("ready") or type(ready_end) is not int or not cursor <= ready_end <= chunk_end:
-                        break
+                        raise RuntimeError("Torrent engine returned an invalid verified range")
                     partial = ready_end < chunk_end
                     chunk_end = ready_end
                     waited = time.monotonic() - wait_started
@@ -598,7 +610,7 @@ async def stream_file(info_hash: InfoHash, request: Request):
                     await file_handle.seek(cursor)
                     chunk = await file_handle.read(wanted)
                     if len(chunk) != wanted:
-                        break
+                        raise RuntimeError("Verified torrent file was truncated during playback")
 
                     cursor += len(chunk)
                     yield chunk

@@ -31,8 +31,8 @@ class DemandRate:
         self.cursor, self.at = cursor, now
 
     def lookahead(self, limit: int, piece_size: int) -> int:
-        target = self.rate * 12 if self.sampled else 8 * MIB
-        return min(max(0, limit), int(max(4 * MIB, 2 * piece_size, target)))
+        target = self.rate * 12 if self.sampled else 16 * MIB
+        return min(max(0, limit), int(max(16 * MIB, 2 * piece_size, target)))
 
     def deadline_ms(self, bytes_ahead: int) -> int:
         return min(30_000, max(50, int(1000 * bytes_ahead / self.rate)))

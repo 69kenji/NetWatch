@@ -50,6 +50,7 @@ def parse_title(title: str) -> dict:
 
 
 MAX_TORRENT_SOURCE_BYTES = 16 * 1024 * 1024
+MAX_MAGNET_URI_BYTES = 16 * 1024
 MAX_ERROR_BODY_BYTES = 4 * 1024
 
 
@@ -241,7 +242,7 @@ class ProwlarrService:
         return absolute
 
     @classmethod
-    async def resolve_torrent_source(cls, source_url: str) -> dict:
+    async def resolve_torrent_source(cls, source_url: str, *, public_only: bool = False) -> dict:
         """Resolve a Prowlarr download URL to either a magnet URI or .torrent bytes.
 
         Some torrent indexers expose only Prowlarr's ``downloadUrl`` in search results,
@@ -249,18 +250,27 @@ class ProwlarrService:
         instead of a .torrent file. Treat that as a valid torrent source rather than
         attempting to make an HTTP request to the magnet URI.
         """
-        if not settings.PROWLARR_API_KEY or settings.PROWLARR_API_KEY.startswith("your_"):
+        service = "torrent-source" if public_only else "prowlarr"
+
+        def magnet_result(candidate: str) -> dict:
+            if len(candidate.encode("utf-8")) > MAX_MAGNET_URI_BYTES:
+                raise DependencyUnavailableError(service, "magnet URI exceeded the size limit")
+            return {"source_type": "magnet", "magnet": candidate}
+
+        if not public_only and (not settings.PROWLARR_API_KEY or settings.PROWLARR_API_KEY.startswith("your_")):
             raise DependencyUnavailableError("prowlarr", "PROWLARR_API_KEY is not configured")
 
         if source_url.lower().startswith("magnet:?"):
-            return {"source_type": "magnet", "magnet": source_url}
+            return magnet_result(source_url)
 
-        url = cls._normalize_download_url(source_url)
+        url = source_url if public_only else cls._normalize_download_url(source_url)
         base = urlparse(cls.BASE)
-        try:
-            prowlarr_authority = authority_key(cls.BASE)
-        except ValueError as exc:
-            raise DependencyUnavailableError("prowlarr", f"Invalid PROWLARR_URL: {exc}") from exc
+        prowlarr_authority = None
+        if not public_only:
+            try:
+                prowlarr_authority = authority_key(cls.BASE)
+            except ValueError as exc:
+                raise DependencyUnavailableError("prowlarr", f"Invalid PROWLARR_URL: {exc}") from exc
 
         def headers_for(candidate_url: str) -> dict[str, str]:
             target = urlparse(candidate_url)
@@ -270,29 +280,31 @@ class ProwlarrService:
                 and (target.port or (443 if target.scheme == "https" else 80))
                 == (base.port or (443 if base.scheme == "https" else 80))
             )
-            return cls._headers() if same_prowlarr else {}
+            return cls._headers() if not public_only and same_prowlarr else {}
 
-        timeout = aiohttp.ClientTimeout(total=max(settings.DEPENDENCY_TIMEOUT_SECS, 30.0))
+        timeout = aiohttp.ClientTimeout(total=30.0 if public_only else max(settings.DEPENDENCY_TIMEOUT_SECS, 30.0))
         try:
             current_url = url
-            for _ in range(6):
+            for _ in range(7):
                 if current_url.lower().startswith("magnet:?"):
-                    return {"source_type": "magnet", "magnet": current_url}
+                    return magnet_result(current_url)
 
                 parsed_current = urlparse(current_url)
                 if parsed_current.scheme not in {"http", "https"}:
                     raise DependencyUnavailableError(
-                        "prowlarr",
+                        service,
                         f"torrent download redirected to unsupported URI scheme: {parsed_current.scheme or 'none'}",
                     )
                 try:
                     target = await resolve_public_http_target(
                         current_url,
-                        allowed_private_authorities={prowlarr_authority},
+                        require_https=public_only,
+                        allowed_private_authorities=() if public_only else {prowlarr_authority},
                     )
                 except ValueError as exc:
+                    message = "Unsafe or unreachable torrent download URL" if public_only else f"Unsafe torrent download URL: {exc}"
                     raise DependencyUnavailableError(
-                        "prowlarr", f"Unsafe torrent download URL: {exc}"
+                        service, message
                     ) from exc
 
                 # A fresh pinned connector is created for each redirect hop. The
@@ -310,18 +322,18 @@ class ProwlarrService:
                             location = response.headers.get("Location")
                             if not location:
                                 raise DependencyUnavailableError(
-                                    "prowlarr", "torrent download redirect did not include Location"
+                                    service, "torrent download redirect did not include Location"
                                 )
                             next_url = urljoin(current_url, location)
                             if location.lower().startswith("magnet:?"):
                                 next_url = location
                             if next_url.lower().startswith("magnet:?"):
-                                return {"source_type": "magnet", "magnet": next_url}
+                                return magnet_result(next_url)
                             current_url = next_url
                             continue
                         if response.status in (401, 403):
                             raise DependencyUnavailableError(
-                                "prowlarr", f"torrent download authentication returned HTTP {response.status}"
+                                service, f"torrent download authentication returned HTTP {response.status}"
                             )
                         if response.status != 200:
                             try:
@@ -329,31 +341,32 @@ class ProwlarrService:
                             except ValueError:
                                 detail_bytes = b""
                             detail = detail_bytes.decode("utf-8", errors="replace").strip()
-                            suffix = f": {detail[:300]}" if detail else ""
+                            suffix = f": {detail[:300]}" if detail and not public_only else ""
                             raise DependencyUnavailableError(
-                                "prowlarr", f"torrent download returned HTTP {response.status}{suffix}"
+                                service, f"torrent download returned HTTP {response.status}{suffix}"
                             )
 
                         try:
                             payload = await read_response_limited(response, MAX_TORRENT_SOURCE_BYTES)
                         except ValueError as exc:
                             raise DependencyUnavailableError(
-                                "prowlarr", "torrent download exceeded the size limit"
+                                service, "torrent download exceeded the size limit"
                             ) from exc
                         # A few indexers return a magnet URI as a successful text response
                         # instead of redirecting to it. Accept that form as well.
                         text_candidate = payload.decode("utf-8", errors="ignore").strip()
                         if text_candidate.lower().startswith("magnet:?"):
-                            return {"source_type": "magnet", "magnet": text_candidate}
+                            return magnet_result(text_candidate)
                         if not payload or not payload.startswith(b"d"):
                             raise DependencyUnavailableError(
-                                "prowlarr", "download URL did not return a magnet URI or bencoded .torrent file"
+                                service, "download URL did not return a magnet URI or bencoded .torrent file"
                             )
                         return {"source_type": "torrent_file", "torrent_bytes": payload}
             raise DependencyUnavailableError(
-                "prowlarr", "torrent download exceeded redirect limit"
+                service, "torrent download exceeded redirect limit"
             )
         except DependencyUnavailableError:
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            raise DependencyUnavailableError("prowlarr", str(exc)) from exc
+            message = "torrent download failed" if public_only else str(exc)
+            raise DependencyUnavailableError(service, message) from exc

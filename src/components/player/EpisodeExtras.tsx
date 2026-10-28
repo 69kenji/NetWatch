@@ -56,12 +56,9 @@ export function EpisodeExtras({ session, state, blocked, menusOpen }: Props) {
   }, [bridge, session.openedAt, durationKey, chapterKey])
 
   const guideRows = [
-    ...(guide?.genres.length ? [{ key: 'genres', content: <>{guide.genres.join(' · ')}</> }] : []),
-    ...(guide?.rating ? [{ key: 'rating', content: <>{guide.rating.label} <small>({guide.rating.country})</small></> }] : []),
-    ...(guide?.guidance.length ? [
-      { key: 'scope', content: <small className="player-episode-guide__scope">Series guidance</small> },
-      ...guide.guidance.map(row => ({ key: row.label, content: <>{row.label} <small>{row.severity}</small></> })),
-    ] : []),
+    ...(guide?.genres.length ? [{ key: 'genres', label: 'Genres', value: guide.genres.join(' · ') }] : []),
+    ...(guide?.rating ? [{ key: 'rating', label: 'Rating', value: `${guide.rating.label} · ${guide.rating.country}` }] : []),
+    ...(guide?.guidance.map(row => ({ key: row.label, label: row.label, value: row.severity })) || []),
   ]
   useEffect(() => {
     if (guidePhase === 'waiting') {
@@ -77,13 +74,13 @@ export function EpisodeExtras({ session, state, blocked, menusOpen }: Props) {
 
   useEffect(() => {
     if (guidePhase !== 'showing') return
-    const timer = window.setTimeout(() => setGuidePhase('exiting'), 5400 + guideRows.length * 160)
+    const timer = window.setTimeout(() => setGuidePhase('exiting'), 9000 + guideRows.length * 220)
     return () => window.clearTimeout(timer)
   }, [guidePhase, guideRows.length])
 
   useEffect(() => {
     if (guidePhase !== 'exiting') return
-    const timer = window.setTimeout(() => setGuidePhase('done'), guideRows.length * 110 + 400)
+    const timer = window.setTimeout(() => setGuidePhase('done'), guideRows.length * 160 + 600)
     return () => window.clearTimeout(timer)
   }, [guidePhase, guideRows.length])
 
@@ -158,7 +155,9 @@ export function EpisodeExtras({ session, state, blocked, menusOpen }: Props) {
       <aside className={`player-episode-guide${guidePhase === 'exiting' ? ' player-episode-guide--exit' : ''}`}
         style={{ '--row-count': guideRows.length } as CSSProperties} aria-label="Series information">
         {guideRows.map((row, index) => <span className="player-episode-guide__row" key={row.key}
-          style={{ '--row-index': index } as CSSProperties}>{row.content}</span>)}
+          style={{ '--row-index': index } as CSSProperties}>
+          <small>{row.label}</small><strong>{row.value}</strong>
+        </span>)}
       </aside>
     )}
     {!blocked && !menusOpen && (inIntro || (nearEnd && next) || advancing || error) && (
@@ -167,6 +166,14 @@ export function EpisodeExtras({ session, state, blocked, menusOpen }: Props) {
         {inIntro && <button className="player-episode-action" disabled={skipping || advancing} onClick={() => void skip()}>
           {skipping ? 'Skipping…' : 'Skip Intro'} <NavArrowRight width={18} height={18} />
         </button>}
+        {((nearEnd && next) || advancing) && next && <div className="player-next-preview" aria-label="Up next">
+          {next.still && <img src={next.still} alt="" />}
+          <span>
+            <small>Up next · S{String(next.season_number).padStart(2, '0')} E{String(next.episode_number).padStart(2, '0')}</small>
+            <strong>{next.name || 'Next episode'}</strong>
+            {next.runtime ? <em>{next.runtime} min</em> : null}
+          </span>
+        </div>}
         {((nearEnd && next) || advancing) && <NextEpisodeButton
           disabled={advancing || skipping} onClick={() => void advance()}
           autoplay={Boolean(canAutoplay)} countdown={countdown}

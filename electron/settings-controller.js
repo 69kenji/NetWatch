@@ -92,6 +92,7 @@ function createSettingsController({
       const restored = appSettings.update({
         startWithWindows: previous.startWithWindows,
         startMinimized: previous.startMinimized,
+        updateNotifications: previous.updateNotifications,
         flareSolverrEnabled: previous.flareSolverrEnabled,
         resourceProfile: previous.resourceProfile,
       })

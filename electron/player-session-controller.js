@@ -1,6 +1,5 @@
 'use strict'
 
-const crypto = require('crypto')
 const { MpvController } = require('./mpv-controller')
 const { createPlayerProgressController } = require('./player-progress-controller')
 const { createPlayerSubtitleController } = require('./player-subtitle-controller')
@@ -25,9 +24,11 @@ function createPlayerSessionController({
   hardenRendererNavigation,
   isDev,
   keepWatching,
+  viewingHistory,
   lifecycle,
   localLibrary = null,
   onQuitReady,
+  playbackOwnerToken,
   playerRendererUrl,
   shouldMinimizeToTray,
 }) {
@@ -36,6 +37,7 @@ function createPlayerSessionController({
     typeof getAppSettings !== 'function' ||
     typeof saveAppSettings !== 'function' ||
     typeof getMainWindow !== 'function' ||
+    !/^[0-9a-f]{48}$/u.test(playbackOwnerToken) ||
     typeof shouldMinimizeToTray !== 'function'
   ) {
     throw new Error('Player controller dependencies are invalid')
@@ -54,7 +56,7 @@ function createPlayerSessionController({
   let localStartupPromise = null
   const torrentOwners = new Map()
 
-  const progress = createPlayerProgressController({ getAppSettings, keepWatching, mpv })
+  const progress = createPlayerProgressController({ getAppSettings, keepWatching, mpv, viewingHistory })
   const subtitles = createPlayerSubtitleController({ backendBaseUrl, backendJson, mpv })
   const audioPreferences = createPlayerAudioPreferences({ getAppSettings, saveAppSettings })
   const episodes = createPlayerEpisodeController({ backendJson, getAppSettings })
@@ -335,17 +337,20 @@ function createPlayerSessionController({
   
   async function runTorrentAddAndPreparation(payload, generation) {
     const releaseRef = typeof payload.releaseRef === 'string' ? payload.releaseRef.trim() : ''
+    const directSource = typeof payload.directSource === 'string' ? payload.directSource : ''
     const mediaName = payload.mediaName || payload.title || 'NetWatch media'
     const expectedHash = payload.expectedHash || null
-    const ownerToken = crypto.randomBytes(24).toString('hex')
+    const ownerToken = playbackOwnerToken
     let acquiredHash = null
   
     try {
       const addPayload = {
         media_name: mediaName,
         expected_hash: expectedHash,
-        release_ref: releaseRef,
         owner_token: ownerToken,
+        ...(releaseRef ? { release_ref: releaseRef }
+          : directSource.toLowerCase().startsWith('magnet:?') ? { magnet: directSource }
+            : { torrent_url: directSource }),
       }
   
       const added = await backendJson('/api/torrents/add', {
@@ -464,6 +469,47 @@ function createPlayerSessionController({
     }
   }
 
+  function normalizeDirectTorrent(source) {
+    const value = typeof source === 'string' ? source.trim() : ''
+    if (value.toLowerCase().startsWith('magnet:?')) {
+      if (value.length > 16 * 1024) throw new Error('Magnet link is too long')
+      const displayName = new URL(value).searchParams.get('dn')?.trim()
+      return { source: value, title: displayName?.slice(0, 240) || 'Direct stream' }
+    }
+    if (value.length > 4096) throw new Error('.torrent URL is too long')
+    let parsed
+    try { parsed = new URL(value) } catch { throw new Error('Enter a magnet link or HTTPS .torrent URL') }
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || !parsed.hostname) {
+      throw new Error('.torrent URLs must use HTTPS and cannot include credentials')
+    }
+    let filename = parsed.pathname.split('/').at(-1) || ''
+    try { filename = decodeURIComponent(filename) } catch {}
+    const title = filename.replace(/\.torrent$/iu, '').trim().slice(0, 240) || 'Direct stream'
+    return { source: value, title }
+  }
+
+  async function openDirectTorrent(payload) {
+    const direct = normalizeDirectTorrent(payload?.source)
+    const normalizedPayload = {
+      directSource: direct.source,
+      releaseRef: '',
+      localFileId: null,
+      localEpisode: false,
+      source: null,
+      title: direct.title,
+      mediaName: direct.title,
+      mediaItem: null,
+      resumePositionSeconds: 0,
+    }
+    const generation = await openPreparingPlayerSession(normalizedPayload)
+    void runTorrentAddAndPreparation(normalizedPayload, generation)
+    return {
+      session: playerSession,
+      state: mpv.getState(),
+      preparation: { ...playerPreparation },
+    }
+  }
+
   function localPayload(item) {
     const match = item.match
     return {
@@ -567,7 +613,8 @@ function createPlayerSessionController({
 
     const mainWindow = getMainWindow()
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide()
-    await closePlayerSession({ restoreMainWindow: false })
+    progress.checkpointDesktop(playerSession, mpv.getState(), { force: true })
+    windows.hide()
   }
 
   function requireSession(openedAt) {
@@ -755,6 +802,7 @@ function createPlayerSessionController({
       torrentOwners.has(String(infoHash).toLowerCase())
     ),
     openTorrent: openTorrentSession,
+    openDirectTorrent,
     openLocal,
     setFullscreen: windows.setFullscreen,
     stopImmediately,

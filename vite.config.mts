@@ -17,6 +17,14 @@ export default defineConfig({
 
   build: {
     rollupOptions: {
+      onwarn(warning, warn) {
+        if (
+          warning.code === 'MODULE_LEVEL_DIRECTIVE'
+          && warning.message.includes('"use client"')
+          && /[\\/]node_modules[\\/](iconoir-react|framer-motion)[\\/]/u.test(warning.id || '')
+        ) return
+        warn(warning)
+      },
       input: {
         app: fileURLToPath(new URL('./index.html', import.meta.url)),
         player: fileURLToPath(new URL('./player.html', import.meta.url)),

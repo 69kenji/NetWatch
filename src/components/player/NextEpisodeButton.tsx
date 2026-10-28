@@ -2,15 +2,25 @@ import { useEffect, useRef, useState } from 'react'
 import { NavArrowRight } from 'iconoir-react'
 
 // A bounded, local SVG wave; no shader, remote asset, or playback side effect.
-export function wavePath(progress: number, phase: number, reduced = false) {
+export function wavePath(progress: number, phase: number, reduced = false, layer = 0) {
   const fill = Math.max(0, Math.min(1, progress))
-  const amplitude = reduced ? 0 : 12 * fill * (1 - fill)
-  const points = Array.from({ length: 33 }, (_, index) => {
-    const y = index * 100 / 32
-    const x = Math.max(0, Math.min(100, fill * 100 + Math.sin(index * Math.PI / 8 + phase) * amplitude))
-    return `${x.toFixed(3)},${y.toFixed(3)}`
+  const amplitude = reduced ? 0 : (3.2 + layer * 0.45) * Math.min(1, fill * 4, (1 - fill) * 4)
+  const points = Array.from({ length: 25 }, (_, index) => {
+    const position = index / 24
+    const y = position * 100
+    const drift = Math.sin(position * Math.PI * 2.3 + phase * (0.42 + layer * 0.04)) * 0.58
+      + Math.sin(position * Math.PI * 0.9 - phase * 0.26 + layer * 1.4) * 0.28
+      + Math.cos(position * Math.PI * 3.5 + phase * 0.14 - layer) * 0.14
+    const x = Math.max(0, Math.min(100, fill * 100 + drift * amplitude + layer * 1.1 - 1.1))
+    return [x, y]
   })
-  return `M0,0 L${points.join(' L')} L0,100 Z`
+  const [first, ...rest] = points
+  const curve = rest.map(([x, y], index) => {
+    if (index === rest.length - 1) return `Q${x.toFixed(2)},${y.toFixed(2)} ${x.toFixed(2)},${y.toFixed(2)}`
+    const [nextX, nextY] = rest[index + 1]
+    return `Q${x.toFixed(2)},${y.toFixed(2)} ${((x + nextX) / 2).toFixed(2)},${((y + nextY) / 2).toFixed(2)}`
+  }).join(' ')
+  return `M0,0 L${first[0].toFixed(2)},${first[1].toFixed(2)} ${curve} L0,100 Z`
 }
 
 export function NextEpisodeButton({ autoplay, countdown, disabled, title, label, onClick }: {
@@ -19,7 +29,7 @@ export function NextEpisodeButton({ autoplay, countdown, disabled, title, label,
   const [hovered, setHovered] = useState(false)
   const [focused, setFocused] = useState(false)
   const [reduced, setReduced] = useState(() => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches || false)
-  const path = useRef<SVGPathElement>(null)
+  const paths = useRef<Array<SVGPathElement | null>>([])
   const progress = useRef(0)
   useEffect(() => {
     const media = window.matchMedia?.('(prefers-reduced-motion: reduce)')
@@ -31,7 +41,7 @@ export function NextEpisodeButton({ autoplay, countdown, disabled, title, label,
     const target = disabled ? 0 : autoplay ? Math.min(1, (11 - countdown) / 10) : hovered || focused ? 1 : 0
     const paint = (value: number, time: number) => {
       progress.current = value
-      path.current?.setAttribute('d', wavePath(value, time / 180, reduced))
+      paths.current.forEach((path, layer) => path?.setAttribute('d', wavePath(value, time / 240, reduced, layer)))
     }
     if (reduced) { paint(autoplay ? Math.max(0, (10 - countdown) / 10) : target, 0); return }
     const from = progress.current, duration = autoplay ? 1000 : target > from ? 500 : 180
@@ -49,7 +59,9 @@ export function NextEpisodeButton({ autoplay, countdown, disabled, title, label,
     title={title} onClick={onClick} onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
     onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}>
     <svg className="player-next-episode__fill" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" focusable="false">
-      <path ref={path} d={wavePath(0, 0)} fill="white" />
+      <path ref={element => { paths.current[2] = element }} d={wavePath(0, 0, false, 2)} fill="#d5d2ca" opacity="0.55" />
+      <path ref={element => { paths.current[1] = element }} d={wavePath(0, 0, false, 1)} fill="#ebe8e0" opacity="0.72" />
+      <path ref={element => { paths.current[0] = element }} d={wavePath(0, 0)} fill="#f7f5ef" opacity="0.9" />
     </svg>
     <span className="player-next-episode__label">{label}<NavArrowRight width={18} height={18} /></span>
   </button>

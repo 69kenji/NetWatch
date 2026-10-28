@@ -11,12 +11,15 @@ export interface MediaItem {
   backdrop_original?: string | null
   logo?: string | null
   rating: number
+  genres?: string[]
   imdb_id?: string
   tmdb_id?: number
   season?: number
   episode?: number
   episode_title?: string
   is_anime?: boolean
+  series_total_episodes?: number
+  series_total_seasons?: number
 }
 
 export interface Subtitle {

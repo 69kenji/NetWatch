@@ -426,110 +426,91 @@ class SubtitleService:
         if not cls._configured(settings.SUBDL_API_KEY):
             raise SubtitleProviderError("subdl", "SUBDL_API_KEY is not configured")
 
-        language_param = ",".join(language.lower() for language in languages)
-        full_imdb = f"tt{imdb_id}" if imdb_id else None
-        payload: dict = {}
-        strategy = "none"
-
-        async def fetch_json(session, path: str, params: dict[str, object]) -> dict:
-            async with session.get(f"{SUBDL_BASE}{path}", params=params) as response:
-                current = await read_json_limited(response)
-                if response.status != 200 or (isinstance(current, dict) and current.get("status") is False):
-                    message = None
-                    if isinstance(current, dict):
-                        message = current.get("error") or current.get("message")
-                    raise SubtitleProviderError(
-                        "subdl",
-                        message or f"search returned HTTP {response.status}",
-                        response.status,
-                    )
-                return current if isinstance(current, dict) else {}
-
         try:
             async with aiohttp.ClientSession(
                 timeout=cls._timeout(), headers=cls._subdl_headers()
             ) as session:
-                # v2's files/search endpoint is purpose-built for matching a
-                # torrent/release filename and ranks results by release match.
-                if file_name:
-                    file_params: dict[str, object] = {
-                        "filename": file_name,
-                        "languages": language_param,
-                        "subs_per_page": 30,
-                        "engine": "auto",
-                        "episode_scope": "exact",
-                    }
-                    current = await fetch_json(session, "/files/search", file_params)
-                    if current.get("subtitles"):
-                        payload = current
-                        strategy = "filename-v2"
-
-                if not payload.get("subtitles"):
-                    attempts: list[tuple[str, str]] = []
-                    if full_imdb:
-                        attempts.append(("imdb_id", full_imdb))
-                    if query:
-                        attempts.append(("film_name", query))
-                    if file_name:
-                        attempts.append(("file_name", file_name))
-
-                    seen: set[tuple[str, str]] = set()
-                    for key, value in attempts:
-                        if (key, value) in seen:
-                            continue
-                        seen.add((key, value))
-                        params: dict[str, object] = {
-                            key: value,
-                            "languages": language_param,
-                            "unpack": 1,
-                        }
-                        if season:
-                            params["season"] = season
-                        if episode:
-                            params["episode"] = episode
-                        current = await fetch_json(session, "/subtitles/search", params)
-                        payload = current
-                        strategy = f"{key}-v2"
-                        if current.get("subtitles"):
-                            break
-
-                # Final deterministic title resolution. This avoids relying on
-                # fuzzy subtitle search when a title lookup can give us SubDL's
-                # canonical sd_id first.
-                if not payload.get("subtitles") and query:
-                    movie_params: dict[str, object] = {
-                        "q": query,
-                        "limit": 5,
-                        "type": "tv" if season or episode else "movie",
-                    }
-                    resolved = await fetch_json(session, "/movies/search", movie_params)
-                    candidates = resolved.get("results") or []
-                    chosen = None
-                    query_fold = query.casefold().strip()
-                    for candidate in candidates:
-                        if str(candidate.get("name") or "").casefold().strip() == query_fold:
-                            chosen = candidate
-                            break
-                    if chosen is None and candidates:
-                        chosen = candidates[0]
-                    sd_id = chosen.get("sd_id") if isinstance(chosen, dict) else None
-                    if sd_id:
-                        params = {
-                            "sd_id": sd_id,
-                            "languages": language_param,
-                            "unpack": 1,
-                        }
-                        if season:
-                            params["season"] = season
-                        if episode:
-                            params["episode"] = episode
-                        payload = await fetch_json(session, "/subtitles/search", params)
-                        strategy = "sd_id-v2"
+                payload, strategy = await cls._find_subdl_payload(
+                    session, imdb_id, query, file_name, languages, season, episode
+                )
         except SubtitleProviderError:
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             raise SubtitleProviderError("subdl", str(exc)) from exc
 
+        return cls._format_subdl_rows(payload, strategy, season, episode)
+
+    @classmethod
+    async def _subdl_get(cls, session, path: str, params: dict[str, object]) -> dict:
+        async with session.get(f"{SUBDL_BASE}{path}", params=params) as response:
+            current = await read_json_limited(response)
+            if response.status != 200 or (isinstance(current, dict) and current.get("status") is False):
+                message = current.get("error") or current.get("message") if isinstance(current, dict) else None
+                raise SubtitleProviderError("subdl", message or f"search returned HTTP {response.status}", response.status)
+            return current if isinstance(current, dict) else {}
+
+    @classmethod
+    async def _find_subdl_payload(
+        cls, session, imdb_id: Optional[str], query: Optional[str], file_name: Optional[str],
+        languages: list[str], season: Optional[int], episode: Optional[int],
+    ) -> tuple[dict, str]:
+        language_param = ",".join(language.lower() for language in languages)
+        payload: dict = {}
+        strategy = "none"
+        if file_name:
+            payload = await cls._subdl_get(session, "/files/search", {
+                "filename": file_name, "languages": language_param, "subs_per_page": 30,
+                "engine": "auto", "episode_scope": "exact",
+            })
+            if payload.get("subtitles"):
+                return payload, "filename-v2"
+
+        attempts = []
+        if imdb_id:
+            attempts.append(("imdb_id", f"tt{imdb_id}"))
+        if query:
+            attempts.append(("film_name", query))
+        if file_name:
+            attempts.append(("file_name", file_name))
+        seen: set[tuple[str, str]] = set()
+        for key, value in attempts:
+            if (key, value) in seen:
+                continue
+            seen.add((key, value))
+            params: dict[str, object] = {key: value, "languages": language_param, "unpack": 1}
+            if season:
+                params["season"] = season
+            if episode:
+                params["episode"] = episode
+            payload = await cls._subdl_get(session, "/subtitles/search", params)
+            strategy = f"{key}-v2"
+            if payload.get("subtitles"):
+                return payload, strategy
+
+        if not query:
+            return payload, strategy
+        resolved = await cls._subdl_get(session, "/movies/search", {
+            "q": query, "limit": 5, "type": "tv" if season or episode else "movie",
+        })
+        candidates = resolved.get("results") or []
+        query_fold = query.casefold().strip()
+        chosen = next((candidate for candidate in candidates if str(candidate.get("name") or "").casefold().strip() == query_fold), None)
+        if chosen is None and candidates:
+            chosen = candidates[0]
+        sd_id = chosen.get("sd_id") if isinstance(chosen, dict) else None
+        if not sd_id:
+            return payload, strategy
+        params = {"sd_id": sd_id, "languages": language_param, "unpack": 1}
+        if season:
+            params["season"] = season
+        if episode:
+            params["episode"] = episode
+        return await cls._subdl_get(session, "/subtitles/search", params), "sd_id-v2"
+
+    @classmethod
+    def _format_subdl_rows(
+        cls, payload: dict, strategy: str, season: Optional[int], episode: Optional[int]
+    ) -> list[dict]:
         rows: list[dict] = []
         for item in payload.get("subtitles", []) if isinstance(payload, dict) else []:
             unpack_files = item.get("unpack_files") or []
@@ -598,9 +579,8 @@ class SubtitleService:
                     or item.get("format")
                     or cls._format_from_name(file_name_value)
                 ).lower().lstrip(".")
-                stable_id = hashlib.sha1(
+                stable_id = hashlib.sha256(
                     download_ref.encode("utf-8"),
-                    usedforsecurity=False,
                 ).hexdigest()[:16]
                 rows.append({
                     "id": f"subdl:{stable_id}",

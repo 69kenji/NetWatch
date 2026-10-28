@@ -19,6 +19,15 @@
   --border-strong: rgba(255,255,255,.11);
 }
 
+:root {
+  color-scheme: var(--nw-color-scheme, dark);
+  --bg: var(--nw-bg-surface, #0b0b13); --raised: var(--nw-bg-raised, #171725); --hover: var(--nw-bg-hover, #1d1d2c);
+  --text: var(--nw-text-primary, #f3f1fb); --secondary: var(--nw-text-secondary, #b5b0c4); --muted: var(--secondary);
+  --accent: var(--nw-accent-interactive, #7b61ff); --accent-hover: var(--accent); --accent-soft: var(--nw-accent-subtle, #242039);
+  --border: var(--nw-border, #2d2b3a); --border-strong: var(--nw-border-strong, #767080);
+  --success: var(--nw-success, #52d990); --danger: var(--nw-danger, #ef6c78); --warning: var(--nw-warning, #eeb65f);
+}
+
 * { box-sizing: border-box; }
 html, body { width: 100%; min-height: 100%; margin: 0; background: #07070d; }
 body { display: grid; place-items: center; padding: 22px; color: var(--text); }
@@ -190,6 +199,26 @@ input[type="password"]:disabled { opacity: .45; }
 .progress.active { display: block; }
 .progress::after { content: ""; display: block; width: 24%; height: 100%; background: var(--accent); animation: scan 1s ease-in-out infinite; }
 @keyframes scan { from { transform: translateX(-120%); } to { transform: translateX(520%); } }
+
+html, body { background: var(--nw-bg-canvas, #07070d); }
+.setup-shell { border-radius: var(--nw-radius-card, 12px); }
+.button.primary { color: var(--nw-accent-on-interactive, #000); }
+.setup-caption, .optional-label, .credential-hint, .prefixed-secret-input > span { color: var(--secondary); }
+input, select, .prefixed-secret-input { background: var(--raised); color: var(--text); }
+.message.error { color: var(--danger); background: var(--raised); }
+.message.success { color: var(--success); background: var(--raised); }
+.setup-header { background: var(--bg); }
+.setup-stage { color: var(--secondary); }
+.setup-stage.active { color: var(--nw-accent-text, #b7a9ff); border-color: var(--nw-focus-ring, #927cff); }
+.setup-stage.complete { color: var(--success); }
+.setup-select, .setup-select option, input[type="password"] { background: var(--raised); color: var(--text); }
+.button.secondary, input[type="password"]::placeholder { color: var(--secondary); }
+.text-action, .text-action:hover:not(:disabled) { color: var(--nw-accent-text, #b7a9ff); }
+.setup-select:focus, input[type="password"]:focus, .prefixed-secret-input:focus-within { border-color: var(--nw-focus-ring, #927cff); box-shadow: none; }
+.state-chip, .state-chip.good, .state-chip.bad { background: var(--raised); border-color: currentColor; }
+.completion-dot { box-shadow: none; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--nw-focus-ring, #927cff); outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 
 @media (max-width: 620px) {
   body { padding: 12px; }

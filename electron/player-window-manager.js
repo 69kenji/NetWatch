@@ -311,9 +311,15 @@ function createPlayerWindowManager({
 
   function foreground() {
     if (!overlayWindow || overlayWindow.isDestroyed()) return false
-    if (videoWindow && !videoWindow.isDestroyed() && videoWindow.isMinimized()) videoWindow.restore()
+    if (!videoWindow || videoWindow.isDestroyed()) return false
+    if (videoWindow.isMinimized()) videoWindow.restore()
+    else if (!videoWindow.isVisible()) videoWindow.show()
+    syncBounds()
     overlayWindow.show()
     overlayWindow.focus()
+    void mpv.restartVideoSurface(videoWindow, 2500).catch(error => {
+      console.error('[Player foreground surface]', error)
+    })
     return true
   }
 

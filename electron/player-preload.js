@@ -11,6 +11,11 @@ function subscribe(channel, callback) {
 // arbitrary torrent-opening capability. Episode advancement is derived from the
 // current session in the main process, not from a renderer-supplied URL or title.
 contextBridge.exposeInMainWorld('electron', {
+  appearance: {
+    initial: () => ipcRenderer.sendSync('appearance:initial'),
+    get: () => ipcRenderer.invoke('appearance:get'),
+    onChanged: callback => subscribe('appearance:changed', callback),
+  },
   player: {
     getSession: () => ipcRenderer.invoke('player:get-session'),
     getState: () => ipcRenderer.invoke('player:get-state'),

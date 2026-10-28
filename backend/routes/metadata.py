@@ -716,9 +716,10 @@ async def discover_catalog(
     media: str = Query("movies", min_length=2, max_length=16),
     category: str = Query("popular", min_length=3, max_length=16),
     genre: int | None = Query(None, ge=1, le=99999),
+    person: int | None = Query(None, ge=1, le=99_999_999),
 ):
     try:
-        results = await MetadataService.discover_catalog(media, category, genre)
+        results = await MetadataService.discover_catalog(media, category, genre, person)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except DependencyUnavailableError as exc:
@@ -727,6 +728,7 @@ async def discover_catalog(
         "media": media.strip().lower(),
         "category": category.strip().lower(),
         "genre": genre,
+        "person": person,
         "results": results,
     }
 

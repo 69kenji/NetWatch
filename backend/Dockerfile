@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements.txt requirements.lock.txt ./
-RUN pip install --no-cache-dir -r requirements.lock.txt \
+RUN pip install --require-hashes --no-cache-dir -r requirements.lock.txt \
     && pip check
 
 COPY . .

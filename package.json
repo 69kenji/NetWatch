@@ -1,6 +1,6 @@
 {
   "name": "netwatch",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "description": "Self-hosted Windows media client with a Docker/VPN-isolated runtime",
   "license": "GPL-3.0-only",
   "main": "electron/main.js",
@@ -8,6 +8,7 @@
     "dev": "concurrently \"npm run dev:react\" \"npm run dev:electron\"",
     "dev:react": "vite",
     "build:renderer": "vite build",
+    "typecheck": "tsc --noEmit",
     "dev:electron": "wait-on http://localhost:5173 && electron .",
     "build": "npm run package:win",
     "docker:up": "docker compose -f docker/docker-compose.yml up -d",
@@ -32,7 +33,10 @@
     "electron": "^43.5.0",
     "electron-builder": "^26.15.7",
     "vite": "^8.1.5",
-    "wait-on": "^9.1.0"
+    "wait-on": "^9.1.0",
+    "typescript": "7.0.2",
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7"
   },
   "overrides": {
     "@electron/get": {
@@ -144,6 +148,15 @@
       "requestedExecutionLevel": "asInvoker"
     },
     "asar": true,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "grantFileProtocolExtraPrivileges": false
+    },
     "directories": {
       "output": "release"
     },

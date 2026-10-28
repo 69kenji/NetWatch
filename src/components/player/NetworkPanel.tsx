@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { Download, Group, HardDrive, Xmark } from 'iconoir-react'
+import { Activity, Clock, Download, Group, HardDrive, Xmark } from 'iconoir-react'
 
 interface Props {
   preparation: NativePlayerPreparationState | null
@@ -63,7 +63,6 @@ export function NetworkPanel({ preparation, nativeState, onClose }: Props) {
       <header className="player-side-panel__header">
         <div className="player-side-panel__heading">
           <strong>Network</strong>
-          <span>Live torrent connection</span>
         </div>
         <button className="btn btn-ghost btn-icon" onClick={onClose} title="Close network" aria-label="Close network">
           <Xmark width={18} height={18} />
@@ -73,7 +72,7 @@ export function NetworkPanel({ preparation, nativeState, onClose }: Props) {
       <div className="player-side-panel__body player-network-panel__body">
         <dl className="player-network-list">
           <div>
-            <dt><Download width={15} height={15} /> Download speed</dt>
+            <dt aria-label="Download speed"><Download width={15} height={15} /> Speed</dt>
             <dd>{formatRate(speed)}</dd>
           </div>
           <div>
@@ -84,15 +83,15 @@ export function NetworkPanel({ preparation, nativeState, onClose }: Props) {
             </dd>
           </div>
           <div>
-            <dt><Group width={15} height={15} /> Connected peers</dt>
+            <dt aria-label="Connected peers"><Group width={15} height={15} /> Peers</dt>
             <dd>{peers}</dd>
           </div>
           <div>
-            <dt>Buffer ahead</dt>
+            <dt aria-label="Buffer ahead"><Clock width={15} height={15} /> Buffer</dt>
             <dd>{bufferAhead.toFixed(1)} s</dd>
           </div>
           <div>
-            <dt>Torrent state</dt>
+            <dt><Activity width={15} height={15} /> State</dt>
             <dd>{formatTorrentState(preparation?.torrentState)}</dd>
           </div>
         </dl>

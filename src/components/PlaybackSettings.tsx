@@ -6,7 +6,7 @@ export function PlaybackSettings({ preferences, onChange }: {
   onChange: (patch: Partial<PlaybackPreferences>) => void
 }) {
   const options: { key: keyof PlaybackPreferences; label: string; values: readonly (readonly [string | number | boolean, string])[] }[] = [
-    { key: 'autoPlayNextEpisode', label: 'Autoplay next episode', values: [[false, 'Off'], [true, 'On · 10-second countdown']] },
+    { key: 'autoPlayNextEpisode', label: 'Autoplay next episode', values: [[false, 'Off'], [true, 'On · 10 seconds']] },
     { key: 'preferredAudioLanguage', label: 'Audio language', values: [['auto', 'File default'], ...PLAYBACK_LANGUAGES] },
     { key: 'preferredSubtitleLanguage', label: 'Subtitle language', values: [['auto', 'File default'], ['none', 'Off'], ...PLAYBACK_LANGUAGES] },
     { key: 'playbackSpeed', label: 'Playback speed', values: PLAYBACK_SPEEDS.map(value => [value, `${value}×`]) },
@@ -14,11 +14,11 @@ export function PlaybackSettings({ preferences, onChange }: {
     { key: 'subtitleScale', label: 'Subtitle size', values: [0.75, 1, 1.25, 1.5, 2].map(value => [value, `${value * 100}%`]) },
     { key: 'subtitleBackdrop', label: 'Subtitle backdrop', values: [[false, 'Off'], [true, 'On']] },
     { key: 'subtitleContrast', label: 'Subtitle contrast', values: [['standard', 'Standard'], ['high', 'High contrast'], ['yellow', 'Yellow']] },
-    { key: 'overrideSubtitleStyles', label: 'Embedded subtitle styling', values: [[false, 'Preserve'], [true, 'Override']] },
+    { key: 'overrideSubtitleStyles', label: 'Subtitle styling', values: [[false, 'Preserve'], [true, 'Override']] },
   ]
   return <>{options.map(({ key, label, values }) => <section className="nw-settings-card nw-settings-card--compact" key={key}>
     <div className="nw-settings-card__copy"><strong>{label}</strong>
-      {key === 'overrideSubtitleStyles' && <span>Override can change positioned signs and styled anime subtitles.</span>}
+      {key === 'overrideSubtitleStyles' && <span>Override may change signs and styled subtitles.</span>}
     </div>
     <select className="nw-settings-select" aria-label={label} value={String(preferences[key])}
       onChange={event => {

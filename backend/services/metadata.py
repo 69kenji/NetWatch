@@ -47,6 +47,7 @@ def logo(path: Optional[str]) -> Optional[str]:
 class MetadataService:
     _home_cache: Optional[dict] = None
     _home_cache_expires_at: float = 0.0
+    _home_refresh_task: Optional[asyncio.Task] = None
     HOME_CACHE_TTL_SECS = 43_200.0
     HOME_CACHE_SCHEMA_VERSION = 1
     HOME_CACHE_FILENAME = "home-v1.json"
@@ -618,6 +619,7 @@ class MetadataService:
         media: str,
         category: str,
         genre: Optional[int] = None,
+        person: Optional[int] = None,
     ) -> list[dict]:
         """Browse TMDB without exposing a renderer-side Internet path.
 
@@ -631,71 +633,11 @@ class MetadataService:
         genre_id = int(genre) if genre is not None else None
         if genre_id is not None and genre_id <= 0:
             raise ValueError("genre must be a positive TMDB genre id")
+        person_id = int(person) if person is not None else None
+        if person_id is not None and person_id <= 0:
+            raise ValueError("person must be a positive TMDB person id")
 
-        today = date.today().isoformat()
-
-        def discover_params(kind: str, page: int) -> dict[str, Any]:
-            params: dict[str, Any] = {
-                "include_adult": "false",
-                "language": "en-US",
-                "page": page,
-            }
-            genres: list[int] = []
-            if media == "anime":
-                genres.append(ANIMATION_GENRE_ID)
-                params["with_original_language"] = "ja"
-            if genre_id is not None and genre_id not in genres:
-                genres.append(genre_id)
-            if genres:
-                # TMDB treats comma-separated genre ids as AND, which is what we
-                # want for Anime + a user-selected genre such as Drama or Action.
-                params["with_genres"] = ",".join(str(value) for value in genres)
-
-            if category == "popular":
-                params["sort_by"] = "popularity.desc"
-            elif category == "new":
-                if kind == "movie":
-                    params["sort_by"] = "primary_release_date.desc"
-                    params["primary_release_date.lte"] = today
-                else:
-                    params["sort_by"] = "first_air_date.desc"
-                    params["first_air_date.lte"] = today
-            return params
-
-        raw: list[tuple[str, dict]] = []
-        if category == "featured":
-            kinds = ["movie", "tv"] if media == "anime" else (["movie"] if media == "movies" else ["tv"])
-            calls = [
-                cls._get(f"/trending/{kind}/week", {"language": "en-US", "page": page})
-                for kind in kinds
-                for page in (1, 2)
-            ]
-            payloads = await asyncio.gather(*calls)
-            index = 0
-            for kind in kinds:
-                for _page in (1, 2):
-                    payload = payloads[index]
-                    index += 1
-                    for item in payload.get("results", []):
-                        if not isinstance(item, dict):
-                            continue
-                        if genre_id is not None and genre_id not in (item.get("genre_ids") or []):
-                            continue
-                        raw.append((kind, item))
-        else:
-            kinds = ["movie", "tv"] if media == "anime" else (["movie"] if media == "movies" else ["tv"])
-            calls = [
-                cls._get(f"/discover/{kind}", discover_params(kind, page))
-                for kind in kinds
-                for page in (1, 2)
-            ]
-            payloads = await asyncio.gather(*calls)
-            index = 0
-            for kind in kinds:
-                for _page in (1, 2):
-                    payload = payloads[index]
-                    index += 1
-                    raw.extend((kind, item) for item in payload.get("results", []) if isinstance(item, dict))
+        raw = await cls._fetch_discover_rows(media, category, genre_id, person_id)
 
         if media == "anime":
             raw = [(kind, item) for kind, item in raw if cls._looks_like_anime(item, kind)]
@@ -704,17 +646,7 @@ class MetadataService:
             raw = [(kind, item) for kind, item in raw if not cls._looks_like_anime(item, kind)]
             raw = await cls._filter_explicit_raw(raw)
 
-        results: list[dict] = []
-        seen: set[tuple[str, int]] = set()
-        for kind, item in raw:
-            key = (kind, int(item.get("id") or 0))
-            if not key[1] or key in seen:
-                continue
-            seen.add(key)
-            formatted = cls._format_movie_result(item) if kind == "movie" else cls._format_tv_result(item)
-            if media == "anime":
-                formatted["is_anime"] = True
-            results.append(formatted)
+        results = cls._format_discover_rows(raw, anime=media == "anime")
 
         if media == "anime":
             if category == "new":
@@ -729,6 +661,60 @@ class MetadataService:
                 )
 
         return results[:40]
+
+    @classmethod
+    async def _fetch_discover_rows(cls, media: str, category: str, genre_id: Optional[int], person_id: Optional[int] = None) -> list[tuple[str, dict]]:
+        kinds = ["movie", "tv"] if media == "anime" else (["movie"] if media == "movies" else ["tv"])
+        today = date.today().isoformat()
+        calls = []
+        for kind in kinds:
+            for page in (1, 2):
+                if category == "featured":
+                    calls.append(cls._get(f"/trending/{kind}/week", {"language": "en-US", "page": page}))
+                    continue
+                genres = [ANIMATION_GENRE_ID] if media == "anime" else []
+                if genre_id is not None and genre_id not in genres:
+                    genres.append(genre_id)
+                params: dict[str, Any] = {"include_adult": "false", "language": "en-US", "page": page}
+                if person_id is not None:
+                    params["with_cast" if kind == "movie" else "with_people"] = str(person_id)
+                if media == "anime":
+                    params["with_original_language"] = "ja"
+                if genres:
+                    params["with_genres"] = ",".join(str(value) for value in genres)
+                if category == "popular":
+                    params["sort_by"] = "popularity.desc"
+                elif kind == "movie":
+                    params.update({"sort_by": "primary_release_date.desc", "primary_release_date.lte": today})
+                else:
+                    params.update({"sort_by": "first_air_date.desc", "first_air_date.lte": today})
+                calls.append(cls._get(f"/discover/{kind}", params))
+        payloads = await asyncio.gather(*calls)
+        rows: list[tuple[str, dict]] = []
+        for index, payload in enumerate(payloads):
+            kind = kinds[index // 2]
+            for item in payload.get("results", []):
+                if not isinstance(item, dict):
+                    continue
+                if category == "featured" and genre_id is not None and genre_id not in (item.get("genre_ids") or []):
+                    continue
+                rows.append((kind, item))
+        return rows
+
+    @classmethod
+    def _format_discover_rows(cls, rows: list[tuple[str, dict]], *, anime: bool) -> list[dict]:
+        results: list[dict] = []
+        seen: set[tuple[str, int]] = set()
+        for kind, item in rows:
+            key = (kind, int(item.get("id") or 0))
+            if not key[1] or key in seen:
+                continue
+            seen.add(key)
+            formatted = cls._format_movie_result(item) if kind == "movie" else cls._format_tv_result(item)
+            if anime:
+                formatted["is_anime"] = True
+            results.append(formatted)
+        return results
 
     @classmethod
     async def search_catalog(cls, query: str, page: int = 1) -> list[dict]:
@@ -778,7 +764,120 @@ class MetadataService:
         return results[:60]
 
     @classmethod
+    async def _home_trending(cls, movies_data: dict, tv_data: dict) -> tuple[list[dict], list[dict], set[int], set[int]]:
+        raw = await cls._filter_explicit_raw(
+            [("movie", item) for item in movies_data.get("results", []) if isinstance(item, dict)]
+            + [("tv", item) for item in tv_data.get("results", []) if isinstance(item, dict)]
+        )
+        movies = [cls._format_movie_result(item) for kind, item in raw if kind == "movie" and not cls._looks_like_anime(item, kind)][:20]
+        tv = [cls._format_tv_result(item) for kind, item in raw if kind == "tv" and not cls._looks_like_anime(item, kind)][:20]
+        movie_ids = {int(item.get("id") or 0) for item in movies_data.get("results", []) if isinstance(item, dict)}
+        tv_ids = {int(item.get("id") or 0) for item in tv_data.get("results", []) if isinstance(item, dict)}
+        return movies, tv, movie_ids, tv_ids
+
+    @classmethod
+    async def _home_anime(cls, movie_data: dict, tv_data: dict) -> list[dict]:
+        raw = await cls._filter_explicit_raw(
+            [("movie", item) for item in movie_data.get("results", []) if isinstance(item, dict)]
+            + [("tv", item) for item in tv_data.get("results", []) if isinstance(item, dict)], enrich_all=True,
+        )
+        deduped: dict[tuple[str, int], dict] = {}
+        for kind, item in raw:
+            formatted = cls._format_movie_result(item) if kind == "movie" else cls._format_tv_result(item)
+            formatted["is_anime"] = True
+            deduped.setdefault((str(formatted.get("type")), int(formatted.get("id") or 0)), formatted)
+        results = list(deduped.values())
+        results.sort(key=lambda item: (item.get("popularity") or 0, item.get("vote_count") or 0), reverse=True)
+        return results[:24]
+
+    @classmethod
+    async def _home_recent_movies(cls, rows: list[dict], today: date, trending_ids: set[int]) -> list[dict]:
+        enrichment = await cls._enrich_many([("movie", int(item.get("id") or 0)) for item in rows if isinstance(item, dict)])
+        scored: list[tuple[float, dict]] = []
+        for item in rows:
+            if not isinstance(item, dict) or cls._looks_like_anime(item, "movie"):
+                continue
+            extra = enrichment.get(("movie", int(item.get("id") or 0)), {})
+            if is_explicit_content(
+                adult=bool(item.get("adult")) or bool(extra.get("adult")),
+                title=str(extra.get("title") or item.get("title") or ""),
+                overview=str(extra.get("overview") or item.get("overview") or ""), keywords=(),
+            ) or is_indian_production(extra.get("countries") or ()) or not recent_origin_allowed(extra.get("countries") or ()):
+                continue
+            formatted = cls._format_movie_result(item)
+            score = recent_score(
+                popularity=formatted.get("popularity") or 0, vote_count=formatted.get("vote_count") or 0,
+                rating=formatted.get("rating") or 0, release_date=formatted.get("release_date"), today=today,
+                trending=int(item.get("id") or 0) in trending_ids, release_types=extra.get("release_types") or (),
+                has_poster=bool(formatted.get("poster")), has_backdrop=bool(formatted.get("backdrop")),
+            )
+            scored.append((score, formatted))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [item for _, item in scored[:24]]
+
+    @classmethod
+    async def _home_recent_tv(cls, rows: list[dict], today: date, trending_ids: set[int]) -> list[dict]:
+        filtered = await cls._filter_explicit_raw([("tv", item) for item in rows if isinstance(item, dict)])
+        scored: list[tuple[float, dict]] = []
+        for _, item in filtered:
+            if cls._looks_like_anime(item, "tv") or not recent_origin_allowed(item.get("origin_country") or ()):
+                continue
+            formatted = cls._format_tv_result(item)
+            score = recent_score(
+                popularity=formatted.get("popularity") or 0, vote_count=formatted.get("vote_count") or 0,
+                rating=formatted.get("rating") or 0, release_date=formatted.get("release_date"), today=today,
+                trending=int(item.get("id") or 0) in trending_ids,
+                has_poster=bool(formatted.get("poster")), has_backdrop=bool(formatted.get("backdrop")),
+            )
+            scored.append((score, formatted))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [item for _, item in scored[:24]]
+
+    @classmethod
+    async def _home_recent_anime(
+        cls, movie_data: dict, tv_data: dict, today: date, movie_ids: set[int], tv_ids: set[int]
+    ) -> list[dict]:
+        raw = await cls._filter_explicit_raw(
+            [("movie", item) for item in movie_data.get("results", []) if isinstance(item, dict)]
+            + [("tv", item) for item in tv_data.get("results", []) if isinstance(item, dict)], enrich_all=True,
+        )
+        scored: list[tuple[float, dict]] = []
+        seen: set[tuple[str, int]] = set()
+        for kind, item in raw:
+            key = (kind, int(item.get("id") or 0))
+            if key in seen:
+                continue
+            seen.add(key)
+            formatted = cls._format_movie_result(item) if kind == "movie" else cls._format_tv_result(item)
+            formatted["is_anime"] = True
+            score = recent_score(
+                popularity=formatted.get("popularity") or 0, vote_count=formatted.get("vote_count") or 0,
+                rating=formatted.get("rating") or 0, release_date=formatted.get("release_date"), today=today,
+                trending=key[1] in (movie_ids if kind == "movie" else tv_ids),
+                has_poster=bool(formatted.get("poster")), has_backdrop=bool(formatted.get("backdrop")),
+            )
+            scored.append((score, formatted))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [item for _, item in scored[:24]]
+
+    @classmethod
     async def home_catalog(cls) -> dict:
+        """Return a cached Home payload or share one cold refresh across callers."""
+        now = time.monotonic()
+        if cls._home_cache is not None and now < cls._home_cache_expires_at:
+            return cls._clone_home_payload(cls._home_cache)
+        task = cls._home_refresh_task
+        if task is None:
+            task = asyncio.create_task(cls._refresh_home_catalog())
+            cls._home_refresh_task = task
+        try:
+            return cls._clone_home_payload(await asyncio.shield(task))
+        finally:
+            if cls._home_refresh_task is task and task.done():
+                cls._home_refresh_task = None
+
+    @classmethod
+    async def _refresh_home_catalog(cls) -> dict:
         """Return Trending + Recent discovery shelves with conservative quality policy."""
         now = time.monotonic()
         if cls._home_cache is not None and now < cls._home_cache_expires_at:
@@ -833,133 +932,13 @@ class MetadataService:
             }),
         )
 
-        # Trending keeps TMDB's order. Only explicit material and cross-shelf anime
-        # duplicates are removed; there is no vote/country/"quality" gate here.
-        trending_raw = await cls._filter_explicit_raw(
-            [("movie", item) for item in movies_data.get("results", []) if isinstance(item, dict)]
-            + [("tv", item) for item in tv_data.get("results", []) if isinstance(item, dict)]
+        movies, tv, trending_movie_ids, trending_tv_ids = await cls._home_trending(movies_data, tv_data)
+        anime, recent_movies, recent_tv, recent_anime = await asyncio.gather(
+            cls._home_anime(anime_movies_data, anime_tv_data),
+            cls._home_recent_movies(recent_movie_raw, today, trending_movie_ids),
+            cls._home_recent_tv(recent_tv_raw, today, trending_tv_ids),
+            cls._home_recent_anime(recent_anime_movies, recent_anime_tv, today, trending_movie_ids, trending_tv_ids),
         )
-        movies = [
-            cls._format_movie_result(item)
-            for media_type, item in trending_raw
-            if media_type == "movie" and not cls._looks_like_anime(item, "movie")
-        ][:20]
-        tv = [
-            cls._format_tv_result(item)
-            for media_type, item in trending_raw
-            if media_type == "tv" and not cls._looks_like_anime(item, "tv")
-        ][:20]
-
-        anime_raw = await cls._filter_explicit_raw(
-            [("movie", item) for item in anime_movies_data.get("results", []) if isinstance(item, dict)]
-            + [("tv", item) for item in anime_tv_data.get("results", []) if isinstance(item, dict)],
-            enrich_all=True,
-        )
-        anime: list[dict] = []
-        for media_type, item in anime_raw:
-            formatted = cls._format_movie_result(item) if media_type == "movie" else cls._format_tv_result(item)
-            formatted["is_anime"] = True
-            anime.append(formatted)
-        anime_deduped: dict[tuple[str, int], dict] = {}
-        for item in anime:
-            anime_deduped.setdefault((str(item.get("type")), int(item.get("id") or 0)), item)
-        anime = list(anime_deduped.values())
-        anime.sort(key=lambda item: (item.get("popularity") or 0, item.get("vote_count") or 0), reverse=True)
-        anime = anime[:24]
-
-        trending_movie_ids = {int(item.get("id") or 0) for item in movies_data.get("results", []) if isinstance(item, dict)}
-        trending_tv_ids = {int(item.get("id") or 0) for item in tv_data.get("results", []) if isinstance(item, dict)}
-
-        # Recent movies are enriched because production countries and release types
-        # are not present in Discover summaries. No major-studio or vote threshold is used.
-        movie_refs = [("movie", int(item.get("id") or 0)) for item in recent_movie_raw if isinstance(item, dict)]
-        movie_enrichment = await cls._enrich_many(movie_refs)
-        recent_movies_scored: list[tuple[float, dict]] = []
-        for item in recent_movie_raw:
-            if not isinstance(item, dict) or cls._looks_like_anime(item, "movie"):
-                continue
-            extra = movie_enrichment.get(("movie", int(item.get("id") or 0)), {})
-            if is_explicit_content(
-                adult=bool(item.get("adult")) or bool(extra.get("adult")),
-                title=str(extra.get("title") or item.get("title") or ""),
-                overview=str(extra.get("overview") or item.get("overview") or ""),
-                # Non-animation movies rely on TMDB's adult flag plus strong text
-                # signals. Generic pornography-themed keywords can describe a
-                # legitimate film about the industry, so they are not a hard gate.
-                keywords=(),
-            ):
-                continue
-            if is_indian_production(extra.get("countries") or ()):
-                continue
-            if not recent_origin_allowed(extra.get("countries") or ()):
-                continue
-            formatted = cls._format_movie_result(item)
-            score = recent_score(
-                popularity=formatted.get("popularity") or 0,
-                vote_count=formatted.get("vote_count") or 0,
-                rating=formatted.get("rating") or 0,
-                release_date=formatted.get("release_date"),
-                today=today,
-                trending=int(item.get("id") or 0) in trending_movie_ids,
-                release_types=extra.get("release_types") or (),
-                has_poster=bool(formatted.get("poster")),
-                has_backdrop=bool(formatted.get("backdrop")),
-            )
-            recent_movies_scored.append((score, formatted))
-        recent_movies_scored.sort(key=lambda pair: pair[0], reverse=True)
-        recent_movies = [item for _, item in recent_movies_scored[:24]]
-
-        recent_tv_filtered = await cls._filter_explicit_raw(
-            [("tv", item) for item in recent_tv_raw if isinstance(item, dict)]
-        )
-        recent_tv_scored: list[tuple[float, dict]] = []
-        for _, item in recent_tv_filtered:
-            if cls._looks_like_anime(item, "tv"):
-                continue
-            if not recent_origin_allowed(item.get("origin_country") or ()):
-                continue
-            formatted = cls._format_tv_result(item)
-            score = recent_score(
-                popularity=formatted.get("popularity") or 0,
-                vote_count=formatted.get("vote_count") or 0,
-                rating=formatted.get("rating") or 0,
-                release_date=formatted.get("release_date"),
-                today=today,
-                trending=int(item.get("id") or 0) in trending_tv_ids,
-                has_poster=bool(formatted.get("poster")),
-                has_backdrop=bool(formatted.get("backdrop")),
-            )
-            recent_tv_scored.append((score, formatted))
-        recent_tv_scored.sort(key=lambda pair: pair[0], reverse=True)
-        recent_tv = [item for _, item in recent_tv_scored[:24]]
-
-        recent_anime_raw = await cls._filter_explicit_raw(
-            [("movie", item) for item in recent_anime_movies.get("results", []) if isinstance(item, dict)]
-            + [("tv", item) for item in recent_anime_tv.get("results", []) if isinstance(item, dict)],
-            enrich_all=True,
-        )
-        recent_anime_scored: list[tuple[float, dict]] = []
-        seen_recent_anime: set[tuple[str, int]] = set()
-        for media_type, item in recent_anime_raw:
-            key = (media_type, int(item.get("id") or 0))
-            if key in seen_recent_anime:
-                continue
-            seen_recent_anime.add(key)
-            formatted = cls._format_movie_result(item) if media_type == "movie" else cls._format_tv_result(item)
-            formatted["is_anime"] = True
-            score = recent_score(
-                popularity=formatted.get("popularity") or 0,
-                vote_count=formatted.get("vote_count") or 0,
-                rating=formatted.get("rating") or 0,
-                release_date=formatted.get("release_date"),
-                today=today,
-                trending=int(item.get("id") or 0) in (trending_movie_ids if media_type == "movie" else trending_tv_ids),
-                has_poster=bool(formatted.get("poster")),
-                has_backdrop=bool(formatted.get("backdrop")),
-            )
-            recent_anime_scored.append((score, formatted))
-        recent_anime_scored.sort(key=lambda pair: pair[0], reverse=True)
-        recent_anime = [item for _, item in recent_anime_scored[:24]]
 
         payload = {
             "movies": movies,
@@ -1148,6 +1127,15 @@ class MetadataService:
     def _format_movie(data: dict) -> dict:
         release_date = data.get("release_date") or ""
         credits = data.get("credits") or {}
+        people = []
+        for member in credits.get("crew", []):
+            if isinstance(member, dict) and member.get("job") == "Director" and member.get("id") and member.get("name"):
+                people.append({"id": int(member["id"]), "name": member["name"]})
+        for member in credits.get("cast", []):
+            if isinstance(member, dict) and member.get("id") and member.get("name") and all(item["id"] != int(member["id"]) for item in people):
+                people.append({"id": int(member["id"]), "name": member["name"]})
+            if len(people) >= 8:
+                break
         external_ids = data.get("external_ids") or {}
         alternative_titles = []
         for item in (data.get("alternative_titles") or {}).get("titles", []):
@@ -1190,6 +1178,7 @@ class MetadataService:
                 for member in credits.get("cast", [])[:8]
                 if isinstance(member, dict)
             ],
+            "people": people[:8],
         }
 
     @staticmethod
@@ -1227,6 +1216,17 @@ class MetadataService:
                 "character": character,
                 "photo": poster(member.get("profile_path"), "w185"),
             })
+
+        people = [
+            {"id": int(member["id"]), "name": member["name"]}
+            for member in data.get("created_by", [])
+            if isinstance(member, dict) and member.get("id") and member.get("name")
+        ]
+        for member in credits.get("cast", []):
+            if isinstance(member, dict) and member.get("id") and member.get("name") and all(item["id"] != int(member["id"]) for item in people):
+                people.append({"id": int(member["id"]), "name": member["name"]})
+            if len(people) >= 8:
+                break
 
         seasons = []
         for season in data.get("seasons", []):
@@ -1271,6 +1271,7 @@ class MetadataService:
             "networks": [n.get("name") for n in data.get("networks", []) if isinstance(n, dict) and n.get("name")],
             "seasons": seasons,
             "cast": cast,
+            "people": people[:8],
             "is_anime": is_anime,
         }
 

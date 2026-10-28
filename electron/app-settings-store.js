@@ -1,23 +1,28 @@
 const fs = require('fs')
 const path = require('path')
 const { PLAYBACK_DEFAULTS, normalizePlaybackPreferences } = require('../shared/playback-preferences.mjs')
+const { DEFAULT_APPEARANCE, normalizeAppearance } = require('../shared/appearance.mjs')
 
-const SETTINGS_VERSION = 4
-const DEFAULT_APP_SETTINGS = Object.freeze({
-  version: SETTINGS_VERSION,
+const SETTINGS_VERSION = 5
+const GLOBAL_DEFAULTS = Object.freeze({
   onClose: 'exit',
   startWithWindows: false,
   startMinimized: false,
-  keepWatchingEnabled: true,
-  keepWatchingLimit: 5,
-  defaultQuality: 'all',
+  updateNotifications: false,
   flareSolverrEnabled: false,
   resourceProfile: 'standard',
   playbackVolume: 100,
   playbackMuted: false,
+})
+const PROFILE_DEFAULTS = Object.freeze({
+  appearance: DEFAULT_APPEARANCE,
+  keepWatchingEnabled: true,
+  keepWatchingLimit: 5,
+  defaultQuality: 'all',
   alwaysSkipIntro: false,
   ...PLAYBACK_DEFAULTS,
 })
+const DEFAULT_APP_SETTINGS = Object.freeze({ version: SETTINGS_VERSION, ...GLOBAL_DEFAULTS, ...PROFILE_DEFAULTS })
 
 const QUALITY_VALUES = new Set(['all', '2160p', '1080p', '720p'])
 
@@ -43,6 +48,7 @@ function normalizeSettings(value, fallback = DEFAULT_APP_SETTINGS) {
   const candidate = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
   const limit = Number(candidate.keepWatchingLimit)
   return {
+    appearance: normalizeAppearance(candidate.appearance),
     ...normalizePlaybackPreferences(candidate, fallback),
     version: SETTINGS_VERSION,
     onClose: candidate.onClose === 'minimize-to-tray' || candidate.onClose === 'exit'
@@ -54,6 +60,9 @@ function normalizeSettings(value, fallback = DEFAULT_APP_SETTINGS) {
     startMinimized: typeof candidate.startMinimized === 'boolean'
       ? candidate.startMinimized
       : fallback.startMinimized,
+    updateNotifications: typeof candidate.updateNotifications === 'boolean'
+      ? candidate.updateNotifications
+      : fallback.updateNotifications,
     keepWatchingEnabled: typeof candidate.keepWatchingEnabled === 'boolean'
       ? candidate.keepWatchingEnabled
       : fallback.keepWatchingEnabled,
@@ -79,11 +88,24 @@ function normalizeSettings(value, fallback = DEFAULT_APP_SETTINGS) {
   }
 }
 
+function normalizeGlobalSettings(value, fallback = GLOBAL_DEFAULTS) {
+  const normalized = normalizeSettings(value, { ...DEFAULT_APP_SETTINGS, ...fallback })
+  return Object.fromEntries(Object.keys(GLOBAL_DEFAULTS).map(key => [key, normalized[key]]))
+}
+
+function normalizeProfileSettings(value, fallback = PROFILE_DEFAULTS) {
+  const normalized = normalizeSettings(value, { ...DEFAULT_APP_SETTINGS, ...fallback })
+  return Object.fromEntries(Object.keys(PROFILE_DEFAULTS).map(key => [key, normalized[key]]))
+}
+
 class AppSettingsStore {
   constructor(filePath) {
     this.filePath = filePath
     this.persistedKeys = new Set()
-    this.value = this.load()
+    this.profileStore = null
+    const loaded = this.load()
+    this.legacyProfileSettings = normalizeProfileSettings(loaded)
+    this.value = normalizeGlobalSettings(loaded)
   }
 
   load() {
@@ -101,7 +123,34 @@ class AppSettingsStore {
   }
 
   get() {
+    return {
+      version: SETTINGS_VERSION,
+      ...this.value,
+      ...(this.profileStore?.getSettings() || this.legacyProfileSettings),
+    }
+  }
+
+  getGlobalSettings() {
     return { ...this.value }
+  }
+
+  replaceGlobalSettings(value) {
+    const next = normalizeGlobalSettings(value, this.value)
+    atomicJson(this.filePath, { version: SETTINGS_VERSION, ...next })
+    this.value = next
+    return this.getGlobalSettings()
+  }
+
+  attachProfileStore(profileStore) {
+    if (!profileStore || typeof profileStore.getSettings !== 'function' || typeof profileStore.updateSettings !== 'function') {
+      throw new Error('Profile settings store is invalid')
+    }
+    this.profileStore = profileStore
+    // Do not erase the legacy personal fields when a corrupt profile file could
+    // not be replaced. They remain the recovery source for the next launch.
+    if (profileStore.isWritable?.() !== false) {
+      atomicJson(this.filePath, { version: SETTINGS_VERSION, ...this.value })
+    }
   }
 
   wasPersisted(key) {
@@ -111,9 +160,11 @@ class AppSettingsStore {
   update(patch) {
     if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Settings update is invalid')
     const allowed = new Set([
+      'appearance',
       'onClose',
       'startWithWindows',
       'startMinimized',
+      'updateNotifications',
       'keepWatchingEnabled',
       'keepWatchingLimit',
       'defaultQuality',
@@ -125,9 +176,19 @@ class AppSettingsStore {
       ...Object.keys(PLAYBACK_DEFAULTS),
     ])
     if (Object.keys(patch).some(key => !allowed.has(key))) throw new Error('Settings update contains an unsupported field')
-    const next = normalizeSettings({ ...this.value, ...patch }, this.value)
-    atomicJson(this.filePath, next)
-    this.value = next
+    const current = this.get()
+    const next = normalizeSettings({ ...current, ...patch }, current)
+    const globalPatch = Object.fromEntries(Object.keys(patch).filter(key => key in GLOBAL_DEFAULTS).map(key => [key, next[key]]))
+    const profilePatch = Object.fromEntries(Object.keys(patch).filter(key => key in PROFILE_DEFAULTS).map(key => [key, next[key]]))
+    if (Object.keys(profilePatch).length) {
+      if (!this.profileStore) throw new Error('Profile settings are unavailable')
+      this.profileStore.updateSettings(profilePatch)
+    }
+    if (Object.keys(globalPatch).length) {
+      const nextGlobal = normalizeGlobalSettings({ ...this.value, ...globalPatch }, this.value)
+      atomicJson(this.filePath, { version: SETTINGS_VERSION, ...nextGlobal })
+      this.value = nextGlobal
+    }
     return this.get()
   }
 }
@@ -135,7 +196,11 @@ class AppSettingsStore {
 module.exports = {
   AppSettingsStore,
   DEFAULT_APP_SETTINGS,
+  GLOBAL_DEFAULTS,
+  PROFILE_DEFAULTS,
   SETTINGS_VERSION,
   atomicJson,
+  normalizeGlobalSettings,
+  normalizeProfileSettings,
   normalizeSettings,
 }

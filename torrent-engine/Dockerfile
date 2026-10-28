@@ -20,7 +20,7 @@ RUN python3 -m venv --system-site-packages /opt/netwatch-venv
 
 WORKDIR /app
 COPY requirements.txt requirements.lock.txt ./
-RUN pip install --no-cache-dir -r requirements.lock.txt \
+RUN pip install --require-hashes --no-cache-dir -r requirements.lock.txt \
     && pip check
 
 COPY . .

@@ -48,6 +48,8 @@ type TmdbCastMember = {
   photo?: string | null
 }
 
+type TmdbPerson = { id: number; name: string }
+
 export type TmdbMovieDetails = TmdbMovieSummary & {
   player_backdrop?: string | null
   logo?: string | null
@@ -57,6 +59,7 @@ export type TmdbMovieDetails = TmdbMovieSummary & {
   imdb_id?: string | null
   status?: string | null
   cast?: TmdbCastMember[]
+  people?: TmdbPerson[]
 }
 
 type TmdbSeasonSummary = {
@@ -106,6 +109,7 @@ export type TmdbSeriesDetails = TmdbSeriesSummary & {
   networks?: string[]
   seasons?: TmdbSeasonSummary[]
   cast?: TmdbCastMember[]
+  people?: TmdbPerson[]
 }
 
 export type MovieStreamOptions = {
@@ -138,6 +142,7 @@ export function toMediaItem(movie: TmdbMovieDetails | TmdbMovieSummary): MediaIt
     backdrop_original: 'player_backdrop' in movie ? movie.player_backdrop || null : null,
     logo: 'logo' in movie ? movie.logo || null : null,
     rating: Number(movie.rating || 0),
+    genres: 'genres' in movie && Array.isArray(movie.genres) ? movie.genres : [],
     ...('imdb_id' in movie && movie.imdb_id ? { imdb_id: movie.imdb_id } : {}),
   }
 }
@@ -155,10 +160,13 @@ export function toSeriesMediaItem(series: TmdbSeriesDetails, episode: TmdbEpisod
     backdrop_original: series.player_backdrop || null,
     logo: series.logo || null,
     rating: Number(series.rating || 0),
+    genres: Array.isArray(series.genres) ? series.genres : [],
     imdb_id: series.imdb_id || undefined,
     season: episode.season_number,
     episode: episode.episode_number,
     episode_title: episode.name,
     is_anime: series.is_anime === true,
+    series_total_episodes: Number(series.number_of_episodes || 0),
+    series_total_seasons: Number(series.number_of_seasons || 0),
   }
 }

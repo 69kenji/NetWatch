@@ -16,7 +16,7 @@ type Props = {
   searching: boolean
   searchInputRef?: RefObject<HTMLInputElement>
   onQueryChange: (value: string) => void
-  onSearch: (event?: FormEvent) => void
+  onSearch: (event?: FormEvent, directQuery?: string) => void
   media: DiscoverMedia
   category: DiscoverCategory
   genreId: number | null

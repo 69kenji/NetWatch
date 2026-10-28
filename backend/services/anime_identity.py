@@ -381,33 +381,22 @@ class AnimeIdentityResolver:
         return result
 
     @classmethod
-    async def _resolve_uncached(
-        cls,
-        series: dict[str, Any],
-        season: int,
-        episode: int,
-        tmdb_absolute: int | None,
-    ) -> dict[str, Any]:
-        tmdb_aliases = [
-            value for value in (
-                _clean_alias(series.get("title")),
-                _clean_alias(series.get("original_title")),
-                *[_clean_alias(value) for value in (series.get("alternative_titles") or [])[:8]],
-            ) if value
-        ]
+    def _series_queries(cls, series: dict[str, Any]) -> tuple[list[str], list[str]]:
+        aliases = [value for value in (
+            _clean_alias(series.get("title")),
+            _clean_alias(series.get("original_title")),
+            *[_clean_alias(value) for value in (series.get("alternative_titles") or [])[:8]],
+        ) if value]
         queries: list[str] = []
-        for value in tmdb_aliases:
+        for value in aliases:
             if _normalized_title(value) not in {_normalized_title(item) for item in queries}:
                 queries.append(value)
             if len(queries) >= 2:
                 break
-        if not queries:
-            return _summary("ANILIST_AMBIGUOUS", reason="no TMDB title identity")
-        try:
-            pages = await asyncio.gather(*(AniListService.search(value) for value in queries))
-        except DependencyUnavailableError as exc:
-            return _summary("ANILIST_UNAVAILABLE", reason=exc.message)
+        return aliases, queries
 
+    @classmethod
+    def _relation_graph(cls, pages: list[list[dict[str, Any]]]) -> tuple[dict[int, dict[str, Any]], set[tuple[int, int]]]:
         nodes: dict[int, dict[str, Any]] = {}
         edges: set[tuple[int, int]] = set()
         for page in pages:
@@ -417,55 +406,119 @@ class AnimeIdentityResolver:
                 relations = item.get("relations")
                 relation_edges = relations.get("edges") if isinstance(relations, dict) else None
                 for edge in relation_edges if isinstance(relation_edges, list) else []:
-                    if not isinstance(edge, dict) or edge.get("relationType") not in _MAINLINE_RELATIONS:
-                        continue
-                    node = edge.get("node")
+                    node = edge.get("node") if isinstance(edge, dict) and edge.get("relationType") in _MAINLINE_RELATIONS else None
                     if not isinstance(node, dict) or not isinstance(node.get("id"), int):
                         continue
                     nodes.setdefault(node["id"], node)
                     if isinstance(item.get("id"), int):
                         edges.add(tuple(sorted((item["id"], node["id"]))))
+        return {key: value for key, value in nodes.items() if _eligible_series(value)}, edges
 
-        eligible = {key: value for key, value in nodes.items() if _eligible_series(value)}
-        normalized_tmdb = {_normalized_title(value) for value in tmdb_aliases if _normalized_title(value)}
-        series_date = _tmdb_date(series.get("release_date"))
-        anchors: list[dict[str, Any]] = []
+    @classmethod
+    def _select_anchor(cls, eligible, aliases, series_date):
+        normalized = {_normalized_title(value) for value in aliases if _normalized_title(value)}
+        anchors = []
         for item in eligible.values():
-            exact = bool(normalized_tmdb & {_normalized_title(value) for value in _aliases(item)})
             started = _start_date(item)
-            year_ok = not series_date or not started or abs(started.year - series_date.year) <= 1
-            if exact and year_ok:
+            if normalized & {_normalized_title(value) for value in _aliases(item)} and (
+                not series_date or not started or abs(started.year - series_date.year) <= 1
+            ):
                 anchors.append(item)
-        if not anchors:
-            return _summary("ANILIST_AMBIGUOUS", reason="no exact title and year anchor")
-
         anchors.sort(key=lambda item: (
-            abs(((_start_date(item) or date.max) - (series_date or _start_date(item) or date.max)).days),
-            item["id"],
+            abs(((_start_date(item) or date.max) - (series_date or _start_date(item) or date.max)).days), item["id"]
         ))
+        if not anchors:
+            return None, normalized, "no exact title and year anchor"
         if len(anchors) > 1:
-            first_date = _start_date(anchors[0])
-            second_date = _start_date(anchors[1])
-            first_distance = abs(((first_date or date.max) - (series_date or first_date or date.max)).days)
-            second_distance = abs(((second_date or date.max) - (series_date or second_date or date.max)).days)
-            if first_distance == second_distance:
-                return _summary("ANILIST_AMBIGUOUS", reason="multiple exact title anchors had equal evidence")
-        anchor = anchors[0]
-        component = {anchor["id"]}
+            distance = lambda item: abs(((_start_date(item) or date.max) - (series_date or _start_date(item) or date.max)).days)
+            if distance(anchors[0]) == distance(anchors[1]):
+                return None, normalized, "multiple exact title anchors had equal evidence"
+        return anchors[0], normalized, None
+
+    @staticmethod
+    def _relation_component(anchor, eligible, edges):
         adjacency: dict[int, set[int]] = {}
         for left, right in edges:
             adjacency.setdefault(left, set()).add(right)
             adjacency.setdefault(right, set()).add(left)
+        component = {anchor["id"]}
         frontier = [anchor["id"]]
         while frontier and len(component) < 20:
             current = frontier.pop(0)
             for related in sorted(adjacency.get(current, set())):
-                if related not in eligible or related in component:
-                    continue
-                component.add(related)
-                frontier.append(related)
-                if len(component) >= 20:
-                    break
+                if related in eligible and related not in component:
+                    component.add(related)
+                    frontier.append(related)
+                    if len(component) >= 20:
+                        break
+        return component
+
+    @staticmethod
+    def _rank_installments(eligible, component, normalized_tmdb, target_date, target_count):
+        ranked = []
+        for item_id in component:
+            item = eligible[item_id]
+            score = 4 + (4 if normalized_tmdb & {_normalized_title(value) for value in _aliases(item)} else 0)
+            started = _start_date(item)
+            if target_date and started:
+                distance = abs((started - target_date).days)
+                score += 5 if distance <= 120 else 3 if distance <= 370 else 0
+            if target_count and _episode_count(item) == target_count:
+                score += 4
+            if item.get("format") == "TV":
+                score += 1
+            ranked.append((score, item))
+        ranked.sort(key=lambda pair: (-pair[0], _start_date(pair[1]) or date.max, pair[1]["id"]))
+        return ranked
+
+    @staticmethod
+    def _episode_coordinate(selected, best_score, episode, tmdb_absolute, anchor, eligible, component, target_date, target_count):
+        selected_start = _start_date(selected)
+        selected_count = _episode_count(selected)
+        date_aligned = bool(target_date and selected_start and abs((selected_start - target_date).days) <= 370)
+        counts_match = bool(target_count and selected_count == target_count)
+        count_conflict = bool(target_count and selected_count and target_count != selected_count)
+        if best_score >= 9 and (counts_match or (date_aligned and not count_conflict)):
+            return selected, selected_start, episode
+        if not tmdb_absolute:
+            return selected, selected_start, None
+        anchor_start = _start_date(anchor)
+        timeline = sorted((
+            item for item_id, item in eligible.items()
+            if item_id in component and _episode_count(item) and (
+                not anchor_start or not _start_date(item) or _start_date(item) >= anchor_start
+            )
+        ), key=lambda item: (_start_date(item) or date.max, item["id"]))
+        remaining = tmdb_absolute
+        for item in timeline:
+            count = _episode_count(item) or 0
+            if remaining <= count:
+                return item, _start_date(item), remaining
+            remaining -= count
+        return selected, selected_start, None
+
+    @classmethod
+    async def _resolve_uncached(
+        cls,
+        series: dict[str, Any],
+        season: int,
+        episode: int,
+        tmdb_absolute: int | None,
+    ) -> dict[str, Any]:
+        tmdb_aliases, queries = cls._series_queries(series)
+        if not queries:
+            return _summary("ANILIST_AMBIGUOUS", reason="no TMDB title identity")
+        try:
+            pages = await asyncio.gather(*(AniListService.search(value) for value in queries))
+        except DependencyUnavailableError as exc:
+            return _summary("ANILIST_UNAVAILABLE", reason=exc.message)
+
+        eligible, edges = cls._relation_graph(pages)
+        series_date = _tmdb_date(series.get("release_date"))
+        anchor, normalized_tmdb, anchor_error = cls._select_anchor(eligible, tmdb_aliases, series_date)
+        if anchor_error:
+            return _summary("ANILIST_AMBIGUOUS", reason=anchor_error)
+        component = cls._relation_component(anchor, eligible, edges)
 
         target_season = next(
             (
@@ -478,58 +531,16 @@ class AnimeIdentityResolver:
         target_count = target_season.get("episode_count")
         target_count = target_count if isinstance(target_count, int) and target_count > 0 else None
 
-        ranked: list[tuple[int, dict[str, Any]]] = []
-        for item_id in component:
-            item = eligible[item_id]
-            score = 4
-            aliases = {_normalized_title(value) for value in _aliases(item)}
-            if normalized_tmdb & aliases:
-                score += 4
-            started = _start_date(item)
-            if target_date and started:
-                distance = abs((started - target_date).days)
-                score += 5 if distance <= 120 else 3 if distance <= 370 else 0
-            count = _episode_count(item)
-            if target_count and count == target_count:
-                score += 4
-            if item.get("format") == "TV":
-                score += 1
-            ranked.append((score, item))
-        ranked.sort(key=lambda pair: (-pair[0], _start_date(pair[1]) or date.max, pair[1]["id"]))
+        ranked = cls._rank_installments(eligible, component, normalized_tmdb, target_date, target_count)
         if not ranked:
             return _summary("ANILIST_AMBIGUOUS", reason="mainline relation graph was empty")
         best_score, selected = ranked[0]
         if len(ranked) > 1 and ranked[1][0] == best_score:
             return _summary("ANILIST_AMBIGUOUS", reason="multiple installments had equal evidence")
 
-        selected_episode: int | None = None
-        selected_start = _start_date(selected)
-        selected_count = _episode_count(selected)
-        date_aligned = bool(target_date and selected_start and abs((selected_start - target_date).days) <= 370)
-        counts_match = bool(target_count and selected_count == target_count)
-        count_conflict = bool(target_count and selected_count and target_count != selected_count)
-        if best_score >= 9 and (counts_match or (date_aligned and not count_conflict)):
-            selected_episode = episode
-        elif tmdb_absolute:
-            anchor_start = _start_date(anchor)
-            timeline = sorted(
-                (
-                    item for item_id, item in eligible.items()
-                    if item_id in component and _episode_count(item) and (
-                        not anchor_start or not _start_date(item) or _start_date(item) >= anchor_start
-                    )
-                ),
-                key=lambda item: (_start_date(item) or date.max, item["id"]),
-            )
-            remaining = tmdb_absolute
-            for item in timeline:
-                count = _episode_count(item) or 0
-                if remaining <= count:
-                    selected = item
-                    selected_start = _start_date(selected)
-                    selected_episode = remaining
-                    break
-                remaining -= count
+        selected, selected_start, selected_episode = cls._episode_coordinate(
+            selected, best_score, episode, tmdb_absolute, anchor, eligible, component, target_date, target_count
+        )
 
         if selected_episode is None or selected_episode <= 0:
             return _summary(

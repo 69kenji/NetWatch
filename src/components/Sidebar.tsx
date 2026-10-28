@@ -1,5 +1,7 @@
-import { Compass, Home, Folder, Settings, WarningTriangle, RefreshCircle, Check } from 'iconoir-react'
+import { BookStack, Clock, Compass, Home, Folder, MediaVideoList, Settings, WarningTriangle, RefreshCircle, Check } from 'iconoir-react'
 import type { NetWatchView } from '../types/torrents'
+import { ProfileAvatar } from './ProfileAvatar'
+import { useProfiles } from '../store/profiles'
 
 type SidebarProps = {
   view: NetWatchView
@@ -10,6 +12,8 @@ type SidebarProps = {
 }
 
 export function Sidebar({ view, runtime, runtimeOpen, onNavigate, onRuntimeClick }: SidebarProps) {
+  const profiles = useProfiles()
+  const activeProfile = profiles?.profiles.find(profile => profile.id === profiles.activeId)
   const runtimeLabel = runtime.phase === 'error' ? 'Needs attention' : runtime.ready ? 'Ready' : runtime.message || 'Starting'
 
   return (
@@ -33,11 +37,21 @@ export function Sidebar({ view, runtime, runtimeOpen, onNavigate, onRuntimeClick
         >
           <Compass width={21} height={21} />
         </button>
-
-        <span className="nw-sidebar__divider" />
+        <button className={`nw-nav-button ${view === 'collections' ? 'is-active' : ''}`} onClick={() => onNavigate('collections')}
+          data-tooltip="Collections" aria-label="Collections" aria-current={view === 'collections' ? 'page' : undefined}>
+          <BookStack width={21} height={21} />
+        </button>
         <button className={`nw-nav-button ${view === 'library' ? 'is-active' : ''}`} onClick={() => onNavigate('library')}
           data-tooltip="Library" aria-label="Library" aria-current={view === 'library' ? 'page' : undefined}>
           <Folder width={21} height={21} />
+        </button>
+        <button className={`nw-nav-button ${view === 'history' ? 'is-active' : ''}`} onClick={() => onNavigate('history')}
+          data-tooltip="History" aria-label="History" aria-current={view === 'history' ? 'page' : undefined}>
+          <Clock width={21} height={21} />
+        </button>
+        <button className={`nw-nav-button ${view === 'queue' ? 'is-active' : ''}`} onClick={() => onNavigate('queue')}
+          data-tooltip="Queue" aria-label="Queue" aria-current={view === 'queue' ? 'page' : undefined}>
+          <MediaVideoList width={21} height={21} />
         </button>
         <button
           className={`nw-nav-button ${view === 'settings' ? 'is-active' : ''}`}
@@ -51,6 +65,9 @@ export function Sidebar({ view, runtime, runtimeOpen, onNavigate, onRuntimeClick
       </nav>
 
       <div className="nw-sidebar__footer">
+        {activeProfile && <button type="button" className={`nw-nav-button nw-profile-nav ${view === 'profile' ? 'is-active' : ''}`}
+          onClick={() => onNavigate('profile')} data-tooltip={`Profile: ${activeProfile.name}`} aria-label={`Open ${activeProfile.name} profile`}
+          aria-current={view === 'profile' ? 'page' : undefined}><ProfileAvatar profile={activeProfile} size={24} /></button>}
         <button
           type="button"
           onClick={onRuntimeClick}

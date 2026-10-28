@@ -23,7 +23,7 @@ Fetch the bundled player before packaging a fresh clone:
 git lfs pull
 ```
 
-Packaging checks that the required player files are Windows binaries and stops if a Git LFS pointer or missing file is found.
+Packaging checks the committed SHA-256 manifest for all bundled executables and verifies that the two Compose files retain the same security controls.
 
 Create an unpacked build first:
 
@@ -43,11 +43,20 @@ Then build the NSIS installer:
 npm run package:win
 ```
 
-For 1.2.0:
+For 2.0.0:
 
 ```text
-release\NetWatch-Setup-1.2.0.exe
+release\NetWatch-Setup-2.0.0.exe
 ```
+
+Create and sign the checksum with the offline Ed25519 release key. Keep the private key outside the repository:
+
+```powershell
+$env:NETWATCH_UPDATE_SIGNING_KEY = 'C:\secure\NetWatch-update-signing-private.pem'
+node packaging\sign-update.js release\NetWatch-Setup-2.0.0.exe
+```
+
+Upload the installer, `.sha256`, and `.sha256.sig` files together. In-app downloads are disabled when the signature is absent or invalid.
 
 ## Installer behavior
 

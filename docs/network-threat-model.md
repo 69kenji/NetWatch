@@ -80,6 +80,8 @@ Replacement profiles are staged until restart and must pass the same VPN checks 
 
 VPN relays, trackers, peers, indexers, metadata services, and subtitle providers are untrusted. Their availability and returned data are not guaranteed.
 
+User-supplied `.torrent` URLs must use HTTPS. The backend resolves and pins public DNS addresses for every redirect, rejects credentials and local or private destinations, sends no Prowlarr headers, allows at most six redirects, and limits the response to 16 MiB within 30 seconds. Magnet links and downloaded torrent files enter the same VPN-bound torrent engine. Direct links are not stored.
+
 Episode playback can query `api.introdb.app` for TV intro/outro timestamps, `api.aniskip.com` for anime timings, and `api.tiffara.com` for series content guidance. AniSkip receives the MAL installment ID from the existing AniList match, its episode number, and rounded video duration. IntroDB and Tiffara receive validated IMDb IDs and, where needed, episode numbers. No file paths or torrent names are sent. Requests use fixed HTTPS hosts, pinned public DNS answers, no redirects, timeouts, bounded responses, and a capped in-memory cache. Failures hide provider data without preventing playback; explicit video chapters remain usable. The desktop renderer never contacts these providers directly.
 
 ## Local media

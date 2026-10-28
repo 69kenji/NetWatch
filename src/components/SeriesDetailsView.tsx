@@ -1,13 +1,19 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { motion } from 'framer-motion'
+import { MyListButton } from './MyListButton'
 import {
+  Eye,
+  EyeClosed,
   Group,
   HardDrive,
+  NavArrowDown,
   NavArrowLeft,
   Play,
+  PlaylistPlus,
   RefreshCircle,
   WarningTriangle,
 } from 'iconoir-react'
+import { ActionMenu } from './ActionMenu'
 import type {
   EpisodeStreamOptions,
   TmdbEpisode,
@@ -27,11 +33,18 @@ interface SeriesDetailsViewProps {
   qualityFilter: QualityFilter
   sortMode: ResultSort
   anime?: boolean
+  episodeProgress: NetWatchKeepWatchingItem[]
   onQualityFilter: (value: QualityFilter) => void
   onSortMode: (value: ResultSort) => void
   onBack: () => void
   onRetry: () => void
-  onPlay: (result: TorrentSearchResult, series: TmdbSeriesDetails, episode: TmdbEpisode) => void
+  onPlay: (result: TorrentSearchResult, series: TmdbSeriesDetails, episode: TmdbEpisode, resumePositionSeconds?: number) => void
+  onPlayFromBeginning: (series: TmdbSeriesDetails, episode: TmdbEpisode) => Promise<void>
+  onPlayNow: (series: TmdbSeriesDetails, episode: TmdbEpisode, resumePositionSeconds?: number) => Promise<void>
+  onSetWatched: (series: TmdbSeriesDetails, episode: TmdbEpisode, watched: boolean) => Promise<void>
+  onSetSeasonWatched: (series: TmdbSeriesDetails, episodes: TmdbEpisode[], watched: boolean) => Promise<void>
+  onPlayNextUnwatched: (series: TmdbSeriesDetails) => void
+  onQueueEpisode: (series: TmdbSeriesDetails, episode: TmdbEpisode) => void
 }
 
 function getErrorMessage(error: unknown) {
@@ -79,7 +92,7 @@ function releaseSource(result: TorrentSearchResult) {
 }
 
 function episodeCode(episode: TmdbEpisode) {
-  return `S${String(episode.season_number).padStart(2, '0')}E${String(episode.episode_number).padStart(2, '0')}`
+  return `S${String(episode.season_number).padStart(2, '0')} · E${String(episode.episode_number).padStart(2, '0')}`
 }
 
 function runtimeLabel(minutes?: number | null) {
@@ -97,11 +110,18 @@ export function SeriesDetailsView({
   qualityFilter,
   sortMode,
   anime = false,
+  episodeProgress,
   onQualityFilter,
   onSortMode,
   onBack,
   onRetry,
   onPlay,
+  onPlayFromBeginning,
+  onPlayNow,
+  onSetWatched,
+  onSetSeasonWatched,
+  onPlayNextUnwatched,
+  onQueueEpisode,
 }: SeriesDetailsViewProps) {
   const series = details || seedSeries
   const [seasonNumber, setSeasonNumber] = useState<number | null>(null)
@@ -115,12 +135,15 @@ export function SeriesDetailsView({
   const [episodeRangeIndex, setEpisodeRangeIndex] = useState(0)
   const [episodeJump, setEpisodeJump] = useState('')
   const [episodeJumpInvalid, setEpisodeJumpInvalid] = useState(false)
-  const [pendingJumpEpisode, setPendingJumpEpisode] = useState<number | null>(null)
+  const [pendingJump, setPendingJump] = useState<{ season: number; episode: number } | null>(null)
   const seasonRequestId = useRef(0)
   const streamRequestId = useRef(0)
   const episodeGridRef = useRef<HTMLDivElement | null>(null)
   const releasesRef = useRef<HTMLElement | null>(null)
   const [releaseSelection, setReleaseSelection] = useState(0)
+  const [episodeMenu, setEpisodeMenu] = useState<{ x: number; y: number; trigger: HTMLElement; episode: TmdbEpisode } | null>(null)
+  const [episodeActionKey, setEpisodeActionKey] = useState<string | null>(null)
+  const [seasonActionBusy, setSeasonActionBusy] = useState(false)
 
   useEffect(() => {
     if (!releaseSelection) return
@@ -137,13 +160,33 @@ export function SeriesDetailsView({
     () => (details?.seasons || []).filter(season => season.season_number > 0 && season.episode_count > 0),
     [details],
   )
+  const seriesProgress = useMemo(() => episodeProgress
+    .filter(record => record.catalog_id === `tv:${series.id}` && Number.isInteger(record.season) && Number.isInteger(record.episode))
+    .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at)), [episodeProgress, series.id])
+  const progressByEpisode = useMemo(() => new Map(seriesProgress.map(record => [
+    `${record.season}:${record.episode}`,
+    record,
+  ])), [seriesProgress])
+  const completedEpisodeCount = new Set(seriesProgress.filter(record => record.duration_seconds > 0 && record.position_seconds / record.duration_seconds >= 0.95)
+    .map(record => `${record.season}:${record.episode}`)).size
+  const totalEpisodeCount = Number(details?.number_of_episodes || 0)
+  const remainingEpisodeCount = totalEpisodeCount > 0 ? Math.max(0, totalEpisodeCount - completedEpisodeCount) : null
+  const lastWatched = seriesProgress[0] || null
+  const validLastWatched = lastWatched && seasons.some(season => season.season_number === lastWatched.season)
+    ? { season: lastWatched.season!, episode: lastWatched.episode! }
+    : null
+  const airedSeasonEpisodes = useMemo(() => (seasonData?.episodes || []).filter(episode => !episode.air_date || Date.parse(episode.air_date) <= Date.now()), [seasonData])
+  const seasonWatched = Boolean(airedSeasonEpisodes.length && airedSeasonEpisodes.every(episode => {
+    const progress = progressByEpisode.get(`${episode.season_number}:${episode.episode_number}`)
+    return Boolean(progress?.duration_seconds && progress.position_seconds / progress.duration_seconds >= 0.95)
+  }))
 
   useEffect(() => {
     if (!details || !seasons.length) return
     setSeasonNumber(current => current != null && seasons.some(item => item.season_number === current)
       ? current
-      : seasons[0].season_number)
-  }, [details, seasons])
+      : validLastWatched?.season ?? seasons[0].season_number)
+  }, [details, seasons, validLastWatched?.season])
 
   useEffect(() => {
     if (!details || seasonNumber == null) return
@@ -159,7 +202,7 @@ export function SeriesDetailsView({
     setEpisodeRangeIndex(0)
     setEpisodeJump('')
     setEpisodeJumpInvalid(false)
-    setPendingJumpEpisode(null)
+    setPendingJump(current => current?.season === seasonNumber ? current : null)
 
     void fetchSeason(details.id, seasonNumber)
       .then(next => {
@@ -229,22 +272,38 @@ export function SeriesDetailsView({
     }
     setEpisodeJumpInvalid(false)
     setEpisodeRangeIndex(Math.floor(episodeIndex / EPISODE_RANGE_SIZE))
-    setPendingJumpEpisode(requested)
+    setPendingJump({ season: seasonNumber!, episode: requested })
   }
 
   useEffect(() => {
-    if (pendingJumpEpisode == null) return
+    if (!pendingJump || !seasonData || pendingJump.season !== seasonNumber) return
+    const episodeIndex = seasonEpisodes.findIndex(episode => episode.episode_number === pendingJump.episode)
+    if (episodeIndex < 0) {
+      setPendingJump(null)
+      return
+    }
+    const rangeIndex = Math.floor(episodeIndex / EPISODE_RANGE_SIZE)
+    if (usesEpisodeRanges && rangeIndex !== episodeRangeIndex) {
+      setEpisodeRangeIndex(rangeIndex)
+      return
+    }
     const frame = window.requestAnimationFrame(() => {
       const target = episodeGridRef.current?.querySelector<HTMLButtonElement>(
-        `[data-episode-number="${pendingJumpEpisode}"]`,
+        `[data-episode-number="${pendingJump.episode}"]`,
       )
       if (!target) return
       target.focus({ preventScroll: true })
-      target.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      setPendingJumpEpisode(null)
+      target.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' })
+      setPendingJump(null)
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [pendingJumpEpisode, episodeRangeIndex, seasonData])
+  }, [pendingJump, episodeRangeIndex, seasonData, seasonNumber, seasonEpisodes, usesEpisodeRanges])
+
+  const jumpToLastWatched = () => {
+    if (!validLastWatched) return
+    setPendingJump(validLastWatched)
+    if (seasonNumber !== validLastWatched.season) setSeasonNumber(validLastWatched.season)
+  }
 
   const releases = streamData?.results || []
   const filtered = qualityFilter === 'all'
@@ -288,6 +347,19 @@ export function SeriesDetailsView({
               {details?.genres?.slice(0, 3).map(genre => <span key={genre}>{genre}</span>)}
             </div>
             {series.overview && <p className="nw-movie-overview">{series.overview}</p>}
+            <div className="nw-series-title-actions">
+              <MyListButton item={{ ...series, is_anime: anime || seedSeries.is_anime || series.is_anime }} />
+              {details && <button type="button" className="btn btn-ghost nw-last-watched-button" onClick={() => onPlayNextUnwatched(details)}>
+                <Play width={17} height={17} /> Play next unwatched
+              </button>}
+              {validLastWatched && <button type="button" className="btn btn-ghost nw-last-watched-button" onClick={jumpToLastWatched}>
+                <NavArrowDown width={17} height={17} /> Jump to last watched
+              </button>}
+            </div>
+            {totalEpisodeCount > 0 && <div className="nw-series-overall-progress" aria-label={`${completedEpisodeCount} of ${totalEpisodeCount} episodes watched`}>
+              <span><i style={{ width: `${Math.min(100, completedEpisodeCount / totalEpisodeCount * 100)}%` }} /></span>
+              <small>{remainingEpisodeCount === 0 ? 'Series completed' : `${completedEpisodeCount} watched · ${remainingEpisodeCount} remaining`}</small>
+            </div>}
             {details?.cast && details.cast.length > 0 && (
               <div className="nw-movie-cast-line">
                 <span>Cast</span>
@@ -335,6 +407,13 @@ export function SeriesDetailsView({
                     ))}
                   </select>
                 </label>
+                {seasonData && <button type="button" className="btn btn-ghost nw-compact-button" disabled={seasonActionBusy || !airedSeasonEpisodes.length}
+                  onClick={() => {
+                    setSeasonActionBusy(true)
+                    void onSetSeasonWatched(details, airedSeasonEpisodes, !seasonWatched).finally(() => setSeasonActionBusy(false))
+                  }}>
+                  {seasonWatched ? <EyeClosed width={17} /> : <Eye width={17} />}{seasonActionBusy ? 'Updating…' : seasonWatched ? 'Mark season unwatched' : 'Mark season watched'}
+                </button>}
 
                 {usesEpisodeRanges && (
                   <>
@@ -390,17 +469,39 @@ export function SeriesDetailsView({
               <div className="nw-episode-grid" ref={episodeGridRef}>
                 {visibleEpisodes.map(episode => {
                   const active = selectedEpisode?.id === episode.id
+                  const key = `${episode.season_number}:${episode.episode_number}`
+                  const progress = progressByEpisode.get(key)
+                  const ratio = progress?.duration_seconds ? Math.max(0, Math.min(1, progress.position_seconds / progress.duration_seconds)) : 0
+                  const watched = ratio >= 0.95
+                  const openEpisodeMenu = (trigger: HTMLElement, x: number, y: number) => {
+                    setEpisodeMenu({ x, y, trigger, episode })
+                  }
                   return (
                     <button
                       type="button"
-                      className={`nw-episode-card ${active ? 'is-active' : ''}`}
+                      className={`nw-episode-card ${active ? 'is-active' : ''} ${watched ? 'is-watched' : ''}`}
                       key={episode.id || `${episode.season_number}-${episode.episode_number}`}
                       data-episode-number={episode.episode_number}
                       onClick={() => selectEpisode(episode)}
+                      onContextMenu={event => {
+                        event.preventDefault()
+                        openEpisodeMenu(event.currentTarget, event.clientX, event.clientY)
+                      }}
+                      onKeyDown={event => {
+                        if (!(event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) return
+                        event.preventDefault()
+                        const bounds = event.currentTarget.getBoundingClientRect()
+                        openEpisodeMenu(event.currentTarget, bounds.left + 18, bounds.top + 18)
+                      }}
+                      aria-busy={episodeActionKey === key}
                     >
                       <div className="nw-episode-card__still">
-                        {episode.still ? <img src={episode.still} alt="" loading="lazy" /> : <span>{episodeCode(episode)}</span>}
+                        {episode.still ? <img src={episode.still} alt="" loading="lazy" /> : <span className="nw-episode-card__fallback">{episodeCode(episode)}</span>}
                         <span className="nw-episode-card__number">{episodeCode(episode)}</span>
+                        {watched && <span className="nw-episode-card__watched" aria-label="Watched"><Eye width={25} height={25} /></span>}
+                        {progress && !watched && <span className="nw-episode-card__progress" aria-label={`${Math.round(ratio * 100)}% watched`}>
+                          <span style={{ width: `${ratio * 100}%` }} />
+                        </span>}
                       </div>
                       <div className="nw-episode-card__copy">
                         <strong>{episode.name}</strong>
@@ -412,6 +513,66 @@ export function SeriesDetailsView({
                 })}
               </div>
             )}
+            {episodeMenu && <ActionMenu
+              x={episodeMenu.x}
+              y={episodeMenu.y}
+              trigger={episodeMenu.trigger}
+              label={`${episodeMenu.episode.name} actions`}
+              onClose={() => setEpisodeMenu(null)}
+            >
+              {(() => {
+                const episode = episodeMenu.episode
+                const progress = progressByEpisode.get(`${episode.season_number}:${episode.episode_number}`)
+                const ratio = progress?.duration_seconds ? progress.position_seconds / progress.duration_seconds : 0
+                const resume = ratio > 0 && ratio < 0.95 ? progress?.position_seconds : undefined
+                return <button type="button" role="menuitem" disabled={Boolean(episodeActionKey)} onClick={() => {
+                  const trigger = episodeMenu.trigger
+                  const key = `${episode.season_number}:${episode.episode_number}`
+                  setEpisodeMenu(null); setEpisodeActionKey(key)
+                  void onPlayNow(details, episode, resume).finally(() => {
+                    setEpisodeActionKey(null)
+                    if (trigger.isConnected) trigger.focus({ preventScroll: true })
+                  })
+                }}><Play width={17} height={17} /><span>{resume ? 'Keep playing' : 'Play now'}</span></button>
+              })()}
+              <button type="button" role="menuitem" disabled={Boolean(episodeActionKey)} onClick={() => {
+                const episode = episodeMenu.episode
+                const trigger = episodeMenu.trigger
+                const key = `${episode.season_number}:${episode.episode_number}`
+                setEpisodeMenu(null)
+                setEpisodeActionKey(key)
+                void onPlayFromBeginning(details, episode).finally(() => {
+                  setEpisodeActionKey(null)
+                  if (trigger.isConnected) trigger.focus({ preventScroll: true })
+                })
+              }}>
+                <Play width={17} height={17} /><span>Play from the beginning</span>
+              </button>
+              <button type="button" role="menuitem" onClick={() => {
+                const episode = episodeMenu.episode
+                const trigger = episodeMenu.trigger
+                setEpisodeMenu(null); onQueueEpisode(details, episode)
+                if (trigger.isConnected) trigger.focus({ preventScroll: true })
+              }}><PlaylistPlus width={17} height={17} /><span>Add to queue</span></button>
+              {(() => {
+                const episode = episodeMenu.episode
+                const progress = progressByEpisode.get(`${episode.season_number}:${episode.episode_number}`)
+                const watched = Boolean(progress?.duration_seconds && progress.position_seconds / progress.duration_seconds >= 0.95)
+                return <button type="button" role="menuitem" disabled={Boolean(episodeActionKey)} onClick={() => {
+                  const trigger = episodeMenu.trigger
+                  const key = `${episode.season_number}:${episode.episode_number}`
+                  setEpisodeMenu(null)
+                  setEpisodeActionKey(key)
+                  void onSetWatched(details, episode, !watched).finally(() => {
+                    setEpisodeActionKey(null)
+                    if (trigger.isConnected) trigger.focus({ preventScroll: true })
+                  })
+                }}>
+                  {watched ? <EyeClosed width={17} height={17} /> : <Eye width={17} height={17} />}
+                  <span>{watched ? 'Mark as Unwatched' : 'Mark as Watched'}</span>
+                </button>
+              })()}
+            </ActionMenu>}
           </>
         )}
       </section>
@@ -482,7 +643,11 @@ export function SeriesDetailsView({
                     type="button"
                     className="nw-stream-row"
                     key={`${result.info_hash || source}-${index}`}
-                    onClick={() => onPlay(result, details, selectedEpisode)}
+                    onClick={() => {
+                      const progress = progressByEpisode.get(`${selectedEpisode.season_number}:${selectedEpisode.episode_number}`)
+                      const ratio = progress?.duration_seconds ? progress.position_seconds / progress.duration_seconds : 0
+                      onPlay(result, details, selectedEpisode, ratio > 0 && ratio < 0.95 ? progress?.position_seconds : undefined)
+                    }}
                     disabled={!source || Boolean(openingSource)}
                   >
                     <span className="nw-stream-row__play">

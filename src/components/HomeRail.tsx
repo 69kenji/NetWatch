@@ -1,5 +1,5 @@
 import { useRef } from 'react'
-import { NavArrowLeft, NavArrowRight } from 'iconoir-react'
+import { NavArrowLeft, NavArrowRight, Xmark } from 'iconoir-react'
 import { CatalogCard } from './CatalogCard'
 import type { TmdbCatalogSummary } from '../types/metadata'
 
@@ -8,10 +8,12 @@ type Props = {
   items: TmdbCatalogSummary[]
   loading?: boolean
   onSelect: (item: TmdbCatalogSummary) => void
+  onRemove?: (item: TmdbCatalogSummary) => void
   cinematic?: boolean
+  isWatched?: (item: TmdbCatalogSummary) => boolean
 }
 
-export function HomeRail({ title, items, loading = false, onSelect, cinematic = false }: Props) {
+export function HomeRail({ title, items, loading = false, onSelect, onRemove, cinematic = false, isWatched }: Props) {
   const railRef = useRef<HTMLDivElement>(null)
 
   const scrollByPage = (direction: -1 | 1) => {
@@ -40,12 +42,25 @@ export function HomeRail({ title, items, loading = false, onSelect, cinematic = 
               <span className={`nw-discovery-skeleton${cinematic ? ' is-cinematic' : ''}`} key={index} />
             ))
           : items.map(item => (
-              <CatalogCard
-                key={`${item.type}-${item.id}`}
-                item={item}
-                variant={cinematic ? 'cinematic' : 'poster'}
-                onSelect={() => onSelect(item)}
-              />
+              <div className="nw-keep-watching-card" key={`${item.type}-${item.id}`}>
+                <CatalogCard
+                  item={item}
+                  variant={cinematic ? 'cinematic' : 'poster'}
+                  onSelect={() => onSelect(item)}
+                  status={isWatched ? (isWatched(item) ? 'Watched' : 'Unwatched') : null}
+                />
+                {onRemove && (
+                  <button
+                    type="button"
+                    className="nw-keep-watching-remove"
+                    aria-label={`Remove ${item.title} from ${title}`}
+                    title={`Remove from ${title}`}
+                    onClick={() => onRemove(item)}
+                  >
+                    <Xmark width={20} height={20} />
+                  </button>
+                )}
+              </div>
             ))}
       </div>
     </section>

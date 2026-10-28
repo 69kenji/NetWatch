@@ -84,11 +84,13 @@ interface NativePlayerSession {
 }
 
 type NetWatchAppSettings = import('./types/playback').PlaybackPreferences & {
+  appearance: import('./theme/types').AppearancePreferences
   alwaysSkipIntro: boolean
   version: number
   onClose: 'minimize-to-tray' | 'exit'
   startWithWindows: boolean
   startMinimized: boolean
+  updateNotifications: boolean
   keepWatchingEnabled: boolean
   keepWatchingLimit: number
   defaultQuality: import('./types/torrents').QualityFilter
@@ -112,6 +114,7 @@ interface NetWatchKeepWatchingState {
   enabled: boolean
   limit: number
   items: NetWatchKeepWatchingItem[]
+  episodeProgress: NetWatchKeepWatchingItem[]
 }
 
 type NativePlayerAction =
@@ -217,8 +220,72 @@ interface NetWatchPairingPayload {
   qr_data_url: string
 }
 
+interface NetWatchProfileSummary {
+  id: string
+  name: string
+  tagline: string
+  avatar: string
+  kind: 'standard' | 'guest'
+  createdAt: string
+}
+
+interface NetWatchProfileState {
+  activeId: string
+  initialId: string
+  profiles: NetWatchProfileSummary[]
+}
+
+interface NetWatchViewingHistoryEntry {
+  id: string
+  sessionId: string
+  catalogId: string
+  type: 'movie' | 'tv'
+  title: string
+  year: string
+  poster: string | null
+  backdrop: string | null
+  isAnime: boolean
+  genres: string[]
+  season?: number
+  episode?: number
+  episodeTitle?: string
+  totalEpisodes?: number
+  totalSeasons?: number
+  startedAt: string
+  updatedAt: string
+  watchedSeconds: number
+  lastPositionSeconds: number
+  durationSeconds: number
+  completed: boolean
+  manual: boolean
+  startedFrom: 'beginning' | 'resumed' | 'manual'
+}
+
+interface NetWatchViewingHistoryState { entries: NetWatchViewingHistoryEntry[] }
+
+interface NetWatchUpdateState {
+  installedVersion: string
+  availableVersion: string
+  updateAvailable: boolean
+  releaseName: string
+  releaseNotes: string
+  publishedAt: string | null
+  pageUrl: string
+  downloadSize: number | null
+  canDownload: boolean
+}
+
 interface Window {
   electron?: {
+    appearance: {
+      initial: () => import('./theme/types').AppearanceState | null
+      get: () => Promise<import('./theme/types').AppearanceState>
+      update: (patch: Partial<Omit<import('./theme/types').AppearancePreferences, 'background'>> & { background?: Partial<import('./theme/types').AppearancePreferences['background']> }) => Promise<import('./theme/types').AppearanceState>
+      preview: (color: string | null) => Promise<import('./theme/types').AppearanceState>
+      importImage: () => Promise<import('./theme/types').AppearanceState>
+      image: () => Promise<{ imageId: string | null; data: string | null; error: string | null }>
+      onChanged: (callback: (state: import('./theme/types').AppearanceState) => void) => () => void
+    }
     window: {
       minimize: () => void
       maximize: () => void
@@ -227,6 +294,31 @@ interface Window {
     settings: {
       get: () => Promise<NetWatchAppSettings>
       update: (patch: Partial<Omit<NetWatchAppSettings, 'version'>>) => Promise<{ cancelled: boolean; settings: NetWatchAppSettings }>
+    }
+    profiles: {
+      getState: () => Promise<NetWatchProfileState>
+      create: (name: string, kind?: 'standard' | 'guest') => Promise<NetWatchProfileState>
+      rename: (id: string, name: string) => Promise<NetWatchProfileState>
+      update: (id: string, patch: { name?: string; tagline?: string; avatar?: string; kind?: 'standard' | 'guest' }) => Promise<NetWatchProfileState>
+      avatar: (id: string) => Promise<{ data: string | null }>
+      importAvatar: (id: string) => Promise<{ cancelled: boolean; state: NetWatchProfileState }>
+      export: (id: string, localProfile: import('./utils/profileStorage').ProfileStorageBackup[string]) => Promise<{ cancelled: boolean; fileName?: string }>
+      import: () => Promise<{ cancelled: boolean; token?: string; preview?: { name: string; historyCount: number; progressCount: number; listCount: number; hasAvatar: boolean }; state: NetWatchProfileState }>
+      commitImport: (token: string, selection: { history: boolean; progress: boolean }) => Promise<{ cancelled: boolean; profileId?: string; localProfile?: import('./utils/profileStorage').ProfileStorageBackup[string]; state: NetWatchProfileState }>
+      cancelImport: (token: string) => Promise<{ cancelled: boolean }>
+      switch: (id: string) => Promise<NetWatchProfileState>
+      delete: (id: string) => Promise<{ cancelled: boolean; state: NetWatchProfileState }>
+      onChanged: (callback: (state: NetWatchProfileState) => void) => () => void
+    }
+    history: {
+      getState: () => Promise<NetWatchViewingHistoryState>
+      remove: (id: string) => Promise<{ removed: boolean; state: NetWatchViewingHistoryState }>
+      clearTitle: (catalogId: string) => Promise<{ removed: number; state: NetWatchViewingHistoryState }>
+      clear: () => Promise<{ cleared: boolean; state: NetWatchViewingHistoryState }>
+      onChanged: (callback: (state: NetWatchViewingHistoryState) => void) => () => void
+    }
+    notifications: {
+      seriesUpdates: (titles: string[]) => Promise<{ shown: boolean }>
     }
     library: {
       list: () => Promise<import('./types/library').LibraryState>
@@ -239,10 +331,29 @@ interface Window {
     keepWatching: {
       getState: () => Promise<NetWatchKeepWatchingState>
       remove: (catalogId: string) => Promise<{ removed: boolean; state: NetWatchKeepWatchingState }>
+      markEpisodeWatched: (mediaItem: import('./store').MediaItem, durationSeconds: number) => Promise<{ marked: boolean; state: NetWatchKeepWatchingState }>
+      removeEpisode: (catalogId: string, season: number, episode: number) => Promise<{ removed: boolean; state: NetWatchKeepWatchingState }>
       onChanged: (callback: (state: NetWatchKeepWatchingState) => void) => () => void
     }
     diagnostics: {
       copy: () => Promise<{ copied: boolean }>
+    }
+    backup: {
+      export: (localProfiles: import('./utils/profileStorage').ProfileStorageBackup) => Promise<{ cancelled: boolean; fileName?: string }>
+      prepareImport: () => Promise<{
+        cancelled: boolean
+        token?: string
+        localProfiles?: import('./utils/profileStorage').ProfileStorageBackup
+        summary?: { createdAt: string | null; sourceVersion: string; profileCount: number; profileNames: string[]; keepWatchingCount: number }
+      }>
+      commitImport: (token: string, selection: { library: boolean; history: boolean; keepWatching: boolean }) => Promise<{ cancelled: boolean; state?: NetWatchProfileState }>
+      cancelImport: (token: string) => Promise<{ cancelled: boolean }>
+    }
+    updates: {
+      check: () => Promise<NetWatchUpdateState>
+      download: () => Promise<{ cancelled: boolean; fileName?: string; sha256?: string; version?: string }>
+      openInstaller: () => Promise<{ cancelled: boolean }>
+      openReleasePage: () => Promise<{ opened: boolean }>
     }
     runtime: {
       getStatus: () => Promise<NetWatchRuntimeStatus>
@@ -282,6 +393,11 @@ interface Window {
         mediaItem?: import('./store').MediaItem | null
         resumePositionSeconds?: number
       }) => Promise<{
+        session: NativePlayerSession
+        state: NativePlayerState
+        preparation: NativePlayerPreparationState
+      }>
+      openDirectTorrent: (request: { source: string }) => Promise<{
         session: NativePlayerSession
         state: NativePlayerState
         preparation: NativePlayerPreparationState

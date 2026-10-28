@@ -51,9 +51,7 @@ def _env_int(name: str, default: int, minimum: int = 0) -> int:
     return max(minimum, value)
 
 
-DOWNLOAD_ROOT = os.path.realpath(
-    os.environ.get("NETWATCH_DOWNLOAD_DIR", "/tmp/netwatch")
-)
+DOWNLOAD_ROOT = "/tmp/netwatch"
 VPN_INTERFACE = os.environ.get("NETWATCH_VPN_INTERFACE", "wg0").strip() or "wg0"
 LISTEN_PORT = _env_int("NETWATCH_LISTEN_PORT", 6881, 1)
 UPLOAD_LIMIT = _env_int("NETWATCH_UPLOAD_LIMIT", 64 * 1024, 0)
@@ -127,9 +125,10 @@ class TorrentEngine:
 
     @staticmethod
     def _ensure_download_root() -> None:
-        if DOWNLOAD_ROOT in {"", "/"}:
-            raise RuntimeError("unsafe NETWATCH_DOWNLOAD_DIR")
-        Path(DOWNLOAD_ROOT).mkdir(parents=True, exist_ok=True)
+        root = Path(DOWNLOAD_ROOT)
+        if root.is_symlink() or os.path.realpath(root) != DOWNLOAD_ROOT:
+            raise RuntimeError("unsafe NetWatch download directory")
+        root.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def _wipe_download_root() -> None:
@@ -766,18 +765,29 @@ class TorrentEngine:
         request_generation: Optional[int] = None,
         probe: bool = False,
     ) -> tuple[int, int, bool, bool]:
-        info, storage, file_size, piece_size, first_piece, requested_last = self._range_geometry(
-            record, file_index, start, end
+        first_piece, requested_last, window_last, piece_size, superseded, cancelled, now = self._select_deadline_window(
+            record, file_index, start, end, lookahead_bytes, request_generation, probe
         )
-        file_offset = max(0, int(storage.file_offset(file_index)))
-        superseded, cancelled = self._request_state(record, request_generation)
         if superseded or cancelled:
             return first_piece, requested_last, superseded, cancelled
+        self._prune_deadlines(record, now)
+        self._apply_piece_deadlines(record, first_piece, requested_last, window_last, piece_size, now)
+        return first_piece, requested_last, False, False
+
+    def _select_deadline_window(
+        self, record: TorrentRecord, file_index: int, start: int, end: int,
+        lookahead_bytes: int, request_generation: Optional[int], probe: bool,
+    ) -> tuple[int, int, int, int, bool, bool, float]:
+        _info, storage, file_size, piece_size, first_piece, requested_last = self._range_geometry(record, file_index, start, end)
+        file_offset = max(0, int(storage.file_offset(file_index)))
+        superseded, cancelled = self._request_state(record, request_generation, probe=probe)
+        if superseded or cancelled:
+            return first_piece, requested_last, requested_last, piece_size, superseded, cancelled, time.monotonic()
         previous = record.deadline_window
         now = time.monotonic()
         # Preparation polling must not pull an established stream back to byte 0.
         if request_generation is None and record.active_request_generation is not None:
-            return first_piece, requested_last, False, False
+            return first_piece, requested_last, requested_last, piece_size, False, False, now
         generation = request_generation or 0
         far = previous is not None and (first_piece < previous[0] - 2 or first_piece > previous[1] + 2)
         owner_gone = record.active_request_generation in record.cancelled_request_generations
@@ -785,7 +795,7 @@ class TorrentEngine:
         sustained = pending is not None and pending[3] == generation and now - pending[2] <= 3 and (
             (first_piece == pending[0] and now - pending[2] >= .5)
             or pending[0] < first_piece <= pending[1] + 2)
-        temporary = previous is not None and not owner_gone and (probe or (far and not sustained))
+        temporary = probe or (previous is not None and not owner_gone and far and not sustained)
         if temporary:
             # Container-header/index probes get only their requested pieces, not
             # a second read-ahead window. They do not take playback ownership.
@@ -795,7 +805,7 @@ class TorrentEngine:
             while len(record.probe_windows) > 4:
                 del record.probe_windows[min(record.probe_windows)]
             if generation not in record.probe_windows:
-                return first_piece, requested_last, False, False
+                return first_piece, requested_last, requested_last, piece_size, False, False, now
             window_last = requested_last
         else:
             if far or owner_gone:
@@ -804,7 +814,11 @@ class TorrentEngine:
                 record.demand.observe(start, now)
             ahead = 0 if probe else record.demand.lookahead(min(max(0, lookahead_bytes), RANGE_LOOKAHEAD_BYTES), piece_size)
             window_last = (file_offset + min(file_size - 1, end + ahead)) // piece_size
-            # Replace, rather than union with, the historical playback range.
+            # A falling demand estimate must not cancel unfinished forward work.
+            # Retain it only within the fixed cap; a confirmed seek starts fresh.
+            if previous and not far and not owner_gone:
+                cap_last = (file_offset + min(file_size - 1, end + RANGE_LOOKAHEAD_BYTES)) // piece_size
+                window_last = max(window_last, min(previous[1], cap_last))
             record.deadline_window = (first_piece, window_last)
             if request_generation is not None:
                 record.active_request_generation = request_generation
@@ -814,22 +828,25 @@ class TorrentEngine:
                 if old_generation <= generation:
                     del record.probe_windows[old_generation]
 
-        self._prune_deadlines(record, now)
+        return first_piece, requested_last, window_last, piece_size, False, False, now
+
+    @staticmethod
+    def _apply_piece_deadlines(record, first_piece, requested_last, window_last, piece_size, now):
         for piece in range(first_piece, window_last + 1):
             if record.handle.have_piece(piece):
                 continue
+            record.handle.piece_priority(piece, 7)
             deadline_ms = 0 if piece <= requested_last else record.demand.deadline_ms((piece - requested_last) * piece_size)
             due = now + deadline_ms / 1000
             # Repeated polls must never postpone a deadline already in flight.
             if due < record.piece_deadlines.get(piece, float("inf")):
                 record.handle.set_piece_deadline(piece, deadline_ms)
                 record.piece_deadlines[piece] = due
-        return first_piece, requested_last, False, False
 
     @staticmethod
-    def _request_state(record, generation):
+    def _request_state(record, generation, *, probe=False):
         cancelled = generation is not None and generation in record.cancelled_request_generations
-        superseded = generation is not None and record.active_request_generation is not None and generation < record.active_request_generation
+        superseded = not probe and generation is not None and record.active_request_generation is not None and generation < record.active_request_generation
         return superseded, cancelled
 
     @staticmethod
@@ -842,6 +859,10 @@ class TorrentEngine:
         for piece in list(record.piece_deadlines):
             if not any(window and window[0] <= piece <= window[1] for window in windows):
                 record.handle.reset_piece_deadline(piece)
+                # Deadlines and priorities must be retired together. Otherwise
+                # abandoned seek/probe pieces remain priority 7 indefinitely.
+                if not record.handle.have_piece(piece):
+                    record.handle.piece_priority(piece, 0)
                 del record.piece_deadlines[piece]
             elif record.handle.have_piece(piece):
                 del record.piece_deadlines[piece]
@@ -861,7 +882,7 @@ class TorrentEngine:
     ) -> dict[str, Any]:
         with self._lock:
             record = self._record(info_hash)
-            superseded, cancelled = self._request_state(record, request_generation)
+            superseded, cancelled = self._request_state(record, request_generation, probe=probe)
             try:
                 info, storage, file_size, piece_size, first_piece, last_piece = self._range_geometry(
                     record, file_index, start, end
@@ -900,7 +921,8 @@ class TorrentEngine:
             ready_end = min(end, file_size - 1)
             if missing:
                 ready_end = min(ready_end, missing[0] * piece_size - int(storage.file_offset(file_index)) - 1)
-            ready = (not missing or (allow_partial and ready_end >= start)) and not superseded and not cancelled
+            minimum_prefix = min(end - start + 1, max(512 * 1024, piece_size))
+            ready = (not missing or (allow_partial and ready_end - start + 1 >= minimum_prefix)) and not superseded and not cancelled
             return {
                 "ready": ready,
                 "ready_end": ready_end if ready else None,

@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion'
+import { MyListButton } from './MyListButton'
 import {
   Group,
   HardDrive,
@@ -95,6 +96,7 @@ export function MovieDetailsView({
               {details.genres?.slice(0, 3).map(genre => <span key={genre}>{genre}</span>)}
             </div>
             {movie.overview && <p className="nw-movie-overview">{movie.overview}</p>}
+            <MyListButton item={{ ...movie, is_anime: seedMovie.is_anime || movie.is_anime || catalogLabel === 'Anime' }} />
 
             {details.cast && details.cast.length > 0 && (
               <div className="nw-movie-cast-line">

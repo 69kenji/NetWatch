@@ -16,7 +16,7 @@ export type TorrentSearchResult = {
   audio?: string
 }
 
-export type NetWatchView = 'home' | 'discover' | 'search' | 'movie' | 'series' | 'settings' | 'library'
+export type NetWatchView = 'home' | 'discover' | 'search' | 'movie' | 'series' | 'settings' | 'library' | 'collections' | 'history' | 'queue' | 'profile'
 export type ResultSort = 'quality' | 'seeders' | 'size'
 export type QualityFilter = 'all' | '2160p' | '1080p' | '720p'
 

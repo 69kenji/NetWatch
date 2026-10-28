@@ -1,6 +1,6 @@
 # NetWatch surface helper
 
-`netwatch-surface-helper.exe` manages mpv's embedded child window while Electron launches mpv directly. It only finds, shows, and resizes the existing window; it cannot launch processes, elevate, run shell commands, or access the network.
+`netwatch-surface-helper.exe` manages mpv's embedded child window while Electron launches mpv directly. It also exposes a constrained Windows DWM command used to extend or reset the frame of a PID-validated NetWatch window. It cannot launch processes, elevate, run shell commands, or access the network.
 
 ## Build provenance
 
@@ -9,7 +9,7 @@
 - Go toolchain: Go 1.23.2
 - CGO: disabled
 - External Go modules: none
-- SHA-256: `0231ebffd279ba3bc4f9075ba00220843610585986643fa7daaedc409433619c`
+- SHA-256: `9121db08a23fba4d30fa5f83655db0025450e9ad9c0600eb6b18ce9198333fd1`
 
 Build command:
 

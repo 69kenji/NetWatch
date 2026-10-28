@@ -52,7 +52,7 @@ Torrent, metadata, subtitle, and indexer traffic runs inside a shared Docker/WSL
 - Optional next-episode autoplay with a cancellable countdown.
 - A local media library with optional, confirmed TMDB matches.
 - Saved audio/subtitle languages, subtitle appearance, playback speed, and video sizing.
-- Local Keep Watching history with resume progress and standard or cinematic Home layouts.
+- Local Keep Watching history, last-episode tracking, and standard or cinematic Home layouts.
 - Optional Windows startup, background tray operation, and minimized startup.
 - Optional OpenSubtitles and SubDL integration.
 - Inner WireGuard routing with fail-closed startup checks, VPN-side DNS, and optional VPNBook profile reminders.
@@ -64,6 +64,8 @@ Next Episode appears at a known outro start, preferring the video's ending chapt
 
 The information overlay appears once per playback session, including resumed playback; buffering does not replay it. TMDB supplies genres and regional age ratings. Tiffara supplies community-rated series guidance, not episode-specific warnings. These lookups run through the VPN backend and send catalog identifiers, never torrent names or device credentials. Missing guidance is omitted, not treated as a clean rating.
 
+TV and anime cards show progress through the last watched episode. Series Details opens on its season; **Jump to last watched** scrolls to the episode without selecting or playing it. Episode cards show saved progress or a watched overlay, resume from that point when played, and can be marked watched or reset from their right-click menu. This follows the active profile and the Keep Watching setting.
+
 ## Local library
 
 Open **Library → Add folder** and choose a Windows drive folder. Refresh rescans it; removing a folder removes only its NetWatch entry and saved matches, never your files. Scans include up to 2,000 videos across 12 folders, skip linked directories and playlists, and do not search online. Network-share and device paths are not accepted.
@@ -71,6 +73,8 @@ Open **Library → Add folder** and choose a Windows drive folder. Refresh resca
 Files play directly in mpv without torrent preparation. `S01E02` filenames identify episodes; local Next Episode requires one unambiguous consecutive file. Confirmed TMDB matches can identify a season boundary. Missing or duplicate episodes do not trigger an online release search. Embedded tracks and chapter-based intro/outro timing work locally.
 
 **Match title** searches TMDB through the VPN. Select a title, enter season/episode numbers for TV, then choose **Confirm match** to save artwork, a synopsis, and catalog identifiers. Clear match removes that association. Once matched, catalog identifiers can also supply episode timings and guidance. Online subtitle search is a separate explicit action for local playback and sends the title and filename through the VPN.
+
+**Open link** accepts a magnet link or public HTTPS `.torrent` URL. NetWatch downloads the torrent file through the VPN, then uses the normal torrent player. Direct links are not saved and do not appear in Keep Watching.
 
 Local playback is desktop-only in this version: it does not populate shared Keep Watching, resume local timestamps, or expose folders to Android. Existing first-run setup remains required. After setup, local playback does not require the streaming services to be ready; matching, artwork retrieval, and online subtitles do.
 
@@ -189,7 +193,7 @@ npm run package:win
 Output:
 
 ```text
-release\NetWatch-Setup-1.2.0.exe
+release\NetWatch-Setup-2.0.0.exe
 ```
 
 See [`packaging/PACKAGING.md`](packaging/PACKAGING.md) for release details.

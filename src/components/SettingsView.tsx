@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Check, RefreshCircle, WarningTriangle } from 'iconoir-react'
-import type { NetWatchUiPreferences } from '../utils/preferences'
+import { Check, NavArrowDown, NavArrowUp, RefreshCircle, WarningTriangle } from 'iconoir-react'
+import { HOME_RAIL_LABELS, type NetWatchUiPreferences } from '../utils/preferences'
 import { PlaybackSettings } from './PlaybackSettings'
+import { localCatalog, useLocalCatalog } from '../store/localCatalog'
+import { ProfileControls } from './ProfileControls'
+import { AppearanceSettings } from './appearance/AppearanceSettings'
+import { DataAndUpdatesSettings } from './DataAndUpdatesSettings'
 
 type Props = {
   preferences: NetWatchUiPreferences
@@ -29,6 +33,7 @@ function vpnBookRemaining(expiresAt: string | null | undefined, nowMs: number) {
 }
 
 export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props) {
+  const { historyEnabled } = useLocalCatalog()
   const update = (patch: Partial<NetWatchUiPreferences>) => onChange(patch)
   const [vpnCheck, setVpnCheck] = useState<NetWatchVpnSanityResult | null>(null)
   const [vpnChecking, setVpnChecking] = useState(false)
@@ -298,14 +303,120 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
         <h1>Settings</h1>
       </header>
 
-      <div className="nw-settings-grid">
-        <PlaybackSettings preferences={preferences} onChange={update} />
+      <div className="nw-settings-stack">
+        <AppearanceSettings />
+
+        <section className="nw-settings-group" aria-labelledby="profiles-settings-title">
+          <header className="nw-settings-group__header">
+            <h2 id="profiles-settings-title">Profiles</h2>
+          </header>
+          <div className="nw-settings-list"><ProfileControls /></div>
+        </section>
+
+        <section className="nw-settings-group" aria-labelledby="playback-settings-title">
+          <header className="nw-settings-group__header">
+            <h2 id="playback-settings-title">Playback</h2>
+          </header>
+          <div className="nw-settings-list"><PlaybackSettings preferences={preferences} onChange={update} /></div>
+        </section>
+
+        <section className="nw-settings-group" aria-labelledby="accessibility-settings-title">
+          <header className="nw-settings-group__header">
+            <h2 id="accessibility-settings-title">Accessibility and TV</h2>
+          </header>
+          <div className="nw-settings-list">
+            <section className="nw-settings-card nw-settings-card--compact">
+              <div className="nw-settings-card__copy">
+                <strong>Interface size</strong>
+              </div>
+              <select className="nw-settings-select" aria-label="Interface size" value={preferences.interfaceScale}
+                onChange={event => update({ interfaceScale: Number(event.target.value) as NetWatchUiPreferences['interfaceScale'] })}>
+                <option value={100}>100%</option>
+                <option value={115}>115%</option>
+                <option value={130}>130%</option>
+              </select>
+            </section>
+
+            <section className="nw-settings-card nw-settings-card--compact">
+              <div className="nw-settings-card__copy">
+                <strong>High contrast</strong>
+              </div>
+              <select className="nw-settings-select" aria-label="High contrast" value={preferences.contrastMode}
+                onChange={event => update({ contrastMode: event.target.value as NetWatchUiPreferences['contrastMode'] })}>
+                <option value="standard">Standard</option>
+                <option value="strong">Strong</option>
+              </select>
+            </section>
+
+            <section className="nw-settings-card nw-settings-card--compact">
+              <div className="nw-settings-card__copy">
+                <strong>Reduced motion</strong>
+              </div>
+              <select className="nw-settings-select" aria-label="Reduced motion" value={preferences.reducedMotion ? 'enabled' : 'disabled'}
+                onChange={event => update({ reducedMotion: event.target.value === 'enabled' })}>
+                <option value="disabled">Follow Windows</option>
+                <option value="enabled">Reduce</option>
+              </select>
+            </section>
+
+            <section className="nw-settings-card nw-settings-card--compact">
+              <div className="nw-settings-card__copy">
+                <strong>TV mode</strong>
+                <small>Larger controls. Controller: A select, B back, X options.</small>
+              </div>
+              <select className="nw-settings-select" aria-label="TV and controller mode" value={preferences.tvMode ? 'enabled' : 'disabled'}
+                onChange={event => update({ tvMode: event.target.value === 'enabled' })}>
+                <option value="disabled">Off</option>
+                <option value="enabled">On</option>
+              </select>
+            </section>
+          </div>
+        </section>
+
+        <section className="nw-settings-group" aria-labelledby="home-settings-title">
+          <header className="nw-settings-group__header"><h2 id="home-settings-title">Home</h2></header>
+          <div className="nw-settings-list">
+            {preferences.homeRailOrder.map((key, index) => <section className="nw-settings-card nw-settings-card--compact" key={key}>
+              <div className="nw-settings-card__copy"><strong>{HOME_RAIL_LABELS[key]}</strong></div>
+              <div className="nw-compact-actions">
+                <select className="nw-settings-select" aria-label={`${HOME_RAIL_LABELS[key]} visibility`}
+                  value={preferences.hiddenHomeRails.includes(key) ? 'hidden' : 'visible'} onChange={event => onChange({
+                    hiddenHomeRails: event.target.value === 'hidden'
+                      ? [...new Set([...preferences.hiddenHomeRails, key])]
+                      : preferences.hiddenHomeRails.filter(item => item !== key),
+                  })}>
+                  <option value="visible">Show</option><option value="hidden">Hide</option>
+                </select>
+                <button className="nw-icon-button" disabled={index === 0} title="Move up" aria-label={`Move ${HOME_RAIL_LABELS[key]} up`} onClick={() => {
+                  const order = [...preferences.homeRailOrder]; [order[index - 1], order[index]] = [order[index], order[index - 1]]; onChange({ homeRailOrder: order })
+                }}><NavArrowUp width={17} /></button>
+                <button className="nw-icon-button" disabled={index === preferences.homeRailOrder.length - 1} title="Move down" aria-label={`Move ${HOME_RAIL_LABELS[key]} down`} onClick={() => {
+                  const order = [...preferences.homeRailOrder]; [order[index + 1], order[index]] = [order[index], order[index + 1]]; onChange({ homeRailOrder: order })
+                }}><NavArrowDown width={17} /></button>
+              </div>
+            </section>)}
+            <section className="nw-settings-card nw-settings-card--compact">
+              <div className="nw-settings-card__copy"><strong>New episode notifications</strong><small>Notify me about new episodes.</small></div>
+              <select className="nw-settings-select" value={preferences.trackedSeriesNotifications ? 'enabled' : 'disabled'} aria-label="New episode notifications"
+                onChange={event => onChange({ trackedSeriesNotifications: event.target.value === 'enabled' })}>
+                <option value="disabled">Off</option><option value="enabled">On</option>
+              </select>
+            </section>
+          </div>
+        </section>
+
+        <section className="nw-settings-group" aria-labelledby="general-settings-title">
+          <header className="nw-settings-group__header">
+            <h2 id="general-settings-title">General</h2>
+          </header>
+          <div className="nw-settings-list">
         <section className="nw-settings-card nw-settings-card--compact">
           <div className="nw-settings-card__copy">
-            <strong>Default quality</strong>
+            <strong>Video quality</strong>
           </div>
           <select
             className="nw-settings-select"
+            aria-label="Video quality"
             value={preferences.defaultQuality}
             onChange={event => update({ defaultQuality: event.target.value as NetWatchUiPreferences['defaultQuality'] })}
           >
@@ -333,10 +444,11 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
 
         <section className="nw-settings-card nw-settings-card--compact">
           <div className="nw-settings-card__copy">
-            <strong>On Close</strong>
+            <strong>Close button</strong>
           </div>
           <select
             className="nw-settings-select"
+            aria-label="On close"
             value={preferences.onClose}
             onChange={event => update({ onClose: event.target.value as NetWatchUiPreferences['onClose'] })}
           >
@@ -347,10 +459,11 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
 
         <section className="nw-settings-card nw-settings-card--compact">
           <div className="nw-settings-card__copy">
-            <strong>Start with Windows</strong>
+            <strong>Launch with Windows</strong>
           </div>
           <select
             className="nw-settings-select"
+            aria-label="Launch with Windows"
             value={preferences.startWithWindows ? 'enabled' : 'disabled'}
             onChange={event => update({ startWithWindows: event.target.value === 'enabled' })}
           >
@@ -361,10 +474,11 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
 
         <section className="nw-settings-card nw-settings-card--compact">
           <div className="nw-settings-card__copy">
-            <strong>On startup</strong>
+            <strong>Startup window</strong>
           </div>
           <select
             className="nw-settings-select"
+            aria-label="Startup window state"
             value={preferences.startMinimized ? 'minimized' : 'window'}
             disabled={!preferences.startWithWindows}
             onChange={event => update({ startMinimized: event.target.value === 'minimized' })}
@@ -376,10 +490,27 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
 
         <section className="nw-settings-card nw-settings-card--compact">
           <div className="nw-settings-card__copy">
-            <strong>Keep Watching</strong>
+            <strong>Search history</strong>
+            <small>Keeps the last 20 searches. Turning it off clears them.</small>
           </div>
           <select
             className="nw-settings-select"
+            aria-label="Search history"
+            value={historyEnabled ? 'enabled' : 'disabled'}
+            onChange={event => localCatalog.setHistoryEnabled(event.target.value === 'enabled')}
+          >
+            <option value="enabled">Enabled</option>
+            <option value="disabled">Disabled</option>
+          </select>
+        </section>
+
+        <section className="nw-settings-card nw-settings-card--compact">
+          <div className="nw-settings-card__copy">
+            <strong>Keep Watching and episode progress</strong>
+          </div>
+          <select
+            className="nw-settings-select"
+            aria-label="Keep Watching and episode progress"
             value={preferences.keepWatchingEnabled ? 'enabled' : 'disabled'}
             onChange={event => update({ keepWatchingEnabled: event.target.value === 'enabled' })}
           >
@@ -390,10 +521,11 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
 
         <section className="nw-settings-card nw-settings-card--compact">
           <div className="nw-settings-card__copy">
-            <strong>Cached titles</strong>
+            <strong>Keep Watching limit</strong>
           </div>
           <select
             className="nw-settings-select"
+            aria-label="Keep Watching limit"
             value={preferences.keepWatchingLimit}
             disabled={!preferences.keepWatchingEnabled}
             onChange={event => update({ keepWatchingLimit: Number(event.target.value) })}
@@ -407,10 +539,11 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
         <section className="nw-settings-card nw-settings-card--compact">
           <div className="nw-settings-card__copy">
             <strong>FlareSolverr</strong>
-            <small>Enable only if a Prowlarr indexer requires Cloudflare solving.</small>
+            <small>Use only when an indexer needs it.</small>
           </div>
           <select
             className="nw-settings-select"
+            aria-label="FlareSolverr"
             value={preferences.flareSolverrEnabled ? 'enabled' : 'disabled'}
             onChange={event => update({ flareSolverrEnabled: event.target.value === 'enabled' })}
           >
@@ -422,10 +555,10 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
         <section className="nw-settings-card nw-settings-card--compact">
           <div className="nw-settings-card__copy">
             <strong>Resource usage</strong>
-            <small>Reduced is recommended on systems with limited memory.</small>
           </div>
           <select
             className="nw-settings-select"
+            aria-label="Resource usage"
             value={preferences.resourceProfile}
             onChange={event => update({ resourceProfile: event.target.value as NetWatchUiPreferences['resourceProfile'] })}
           >
@@ -433,6 +566,10 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
             <option value="reduced">Reduced</option>
           </select>
         </section>
+          </div>
+        </section>
+
+        <DataAndUpdatesSettings preferences={preferences} onChange={update} />
       </div>
 
       <section className={`nw-settings-runtime nw-settings-runtime--privacy ${vpnEgressVerified ? 'is-safe' : vpnCheckError ? 'is-error' : ''}`}>
@@ -457,22 +594,22 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
             {vpnProfile && !vpnRestartRequired && (
               <div className="nw-vpn-config-status">
                 <span>Configuration</span>
-                <strong>Current configuration is active.</strong>
+                <strong>In use</strong>
               </div>
             )}
 
             {vpnProfile?.profile_type === 'vpnbook' && (
               <div className={`nw-vpn-expiry ${vpnBookStatus === 'Estimated expired' ? 'is-warning' : ''}`}>
                 <span>Estimated profile expiry</span>
-                <strong>{vpnBookStatus || 'Unknown — re-import a fresh config to enable the estimate'}</strong>
-                <small>Reminder only. NetWatch still verifies the live tunnel and fails closed.</small>
+                <strong>{vpnBookStatus || 'Expiry unknown'}</strong>
+                <small>Connection checks still apply.</small>
               </div>
             )}
 
             {vpnRestartRequired && (
               <div className="nw-vpn-restart-notice">
                 <strong>VPN configuration updated</strong>
-                <small>Restart NetWatch to activate the replacement and run the normal VPN verification gate.</small>
+                <small>Restart NetWatch to use it.</small>
               </div>
             )}
 
@@ -542,7 +679,7 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
           <>
             <div className="nw-remote-enable-row">
               <label>
-                <span>Private interface</span>
+                <span>Network address</span>
                 <select className="nw-settings-select" value={remoteHost} onChange={event => setRemoteHost(event.target.value)} disabled={remoteBusy}>
                   {!remoteStatus?.interfaces?.length && <option value="">No private IPv4 interface found</option>}
                   {remoteStatus?.interfaces?.map(item => (
@@ -558,7 +695,7 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
             </div>
             {!!remoteStatus?.paired_devices?.some(item => !item.revoked) && (
               <div className="nw-remote-devices">
-                <div className="nw-remote-devices__heading"><strong>Paired devices (listener disabled)</strong></div>
+                <div className="nw-remote-devices__heading"><strong>Paired devices</strong></div>
                 {remoteStatus.paired_devices.filter(item => !item.revoked).map(device => (
                   <div className="nw-remote-device" key={device.id}>
                     <div><strong>{device.name}{device.fingerprint ? ` · ${device.fingerprint}` : ''}</strong><small>{device.last_seen ? `Last seen ${new Date(device.last_seen).toLocaleString()}` : 'Not connected yet'}</small></div>
@@ -581,7 +718,7 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
               <div className="nw-remote-address">
                 <span>Local address</span>
                 <strong>{remoteStatus.host || remoteStatus.selected_host}:{remoteStatus.port || remoteStatus.selected_port}</strong>
-                <small>{remoteStatus.runtime_ready ? 'Protected runtime ready' : 'Gateway available; protected runtime not ready'}</small>
+                <small>{remoteStatus.runtime_ready ? 'Ready' : 'Waiting for NetWatch services'}</small>
               </div>
               {!pairing && <button className="btn btn-primary" onClick={() => void beginPairing()} disabled={remoteBusy}>Pair device</button>}
             </div>
@@ -592,7 +729,7 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
                 <div>
                   <strong>Scan with NetWatch Android</strong>
                   <span>{pairing.host}:{pairing.port}</span>
-                  <small>Expires {new Date(pairing.expires_at).toLocaleTimeString()}. The one-time secret is contained only in this QR code.</small>
+                  <small>Expires {new Date(pairing.expires_at).toLocaleTimeString()}.</small>
                   <button className="btn btn-secondary" onClick={() => {
                     const api = window.electron?.remote
                     if (api) void runRemoteAction(() => api.cancelPairing())
@@ -637,8 +774,8 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
       <section className="nw-settings-runtime nw-credentials-panel">
         <div className="nw-credentials-panel__header">
           <span className="nw-settings-label">Credentials</span>
-          <strong>Provider access</strong>
-          <p>NetWatch shows configuration status only. Saved API keys are never displayed.</p>
+          <strong>API keys</strong>
+          <p>Saved keys are hidden.</p>
         </div>
 
         <div className="nw-credentials-list">
@@ -720,7 +857,7 @@ export function SettingsView({ preferences, onChange, onOpenDiagnostics }: Props
       <section className="nw-settings-runtime">
         <div>
           <span className="nw-settings-label">System</span>
-          <strong>Runtime</strong>
+          <strong>Diagnostics</strong>
         </div>
         <button className="btn btn-secondary" onClick={onOpenDiagnostics}>Open</button>
       </section>

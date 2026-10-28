@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion, AnimatePresence, MotionConfig } from 'framer-motion'
 import {
   IconoirProvider,
   Play, Pause, SoundHigh, SoundOff, Expand, Collapse, NavArrowLeft,
@@ -13,6 +13,7 @@ import { ProgressBar } from './ProgressBar'
 import { BufferingOverlay } from './BufferingOverlay'
 import { EpisodeExtras } from './EpisodeExtras'
 import { PlaybackControls } from './PlaybackControls'
+import { loadUiPreferences } from '../../utils/preferences'
 
 
 function SkipTenIcon({ direction, width = 24, height = 24 }: { direction: 'back' | 'forward'; width?: number; height?: number }) {
@@ -109,6 +110,7 @@ function formatDelay(ms: number) {
 }
 
 export function Player() {
+  const accessibility = useRef(loadUiPreferences()).current
   const { player, setPlayerMedia, updatePlayer, closePlayer } = useAppStore()
   const [controlsVisible, setControlsVisible] = useState(true)
   const [cursorVisible, setCursorVisible] = useState(true)
@@ -124,6 +126,8 @@ export function Player() {
   const controlsHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const cursorHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const feedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const gamepadPressed = useRef(new Map<number, boolean>())
+  const gamepadLastSeek = useRef(0)
 
   const bridge = window.electron?.player
 
@@ -443,6 +447,64 @@ export function Player() {
     return () => window.removeEventListener('keydown', handleKeyDown, true)
   }, [fullscreen, networkPanelOpen, tracksPanelOpen, player.position, player.duration, player.paused, nativeState?.muted, bufferOverlayActive])
 
+  useEffect(() => {
+    const root = document.documentElement
+    root.dataset.nwScale = String(accessibility.interfaceScale)
+    root.dataset.nwContrast = accessibility.contrastMode
+    root.dataset.nwReducedMotion = String(accessibility.reducedMotion)
+    root.dataset.nwTv = String(accessibility.tvMode)
+  }, [accessibility])
+
+  useEffect(() => {
+    let frame = 0
+    const edge = (pad: Gamepad, index: number, action: () => void) => {
+      const down = Boolean(pad.buttons[index]?.pressed)
+      const wasDown = gamepadPressed.current.get(index) || false
+      gamepadPressed.current.set(index, down)
+      if (down && !wasDown) action()
+    }
+    const poll = (now: number) => {
+      const pad = Array.from(navigator.getGamepads?.() || []).find((candidate): candidate is Gamepad => Boolean(candidate))
+      if (pad) {
+        edge(pad, 0, () => {
+          const active = document.activeElement
+          if (controlsVisible && active instanceof HTMLButtonElement) active.click()
+          else togglePlay()
+        })
+        edge(pad, 1, () => {
+          if (tracksPanelOpen || networkPanelOpen) {
+            setTracksPanelOpen(false)
+            setNetworkPanelOpen(false)
+          } else void handleClose()
+        })
+        edge(pad, 2, () => { setNetworkPanelOpen(false); setTracksPanelOpen(current => !current) })
+        edge(pad, 3, () => { if (!session?.localFileId) { setTracksPanelOpen(false); setNetworkPanelOpen(current => !current) } })
+        edge(pad, 4, () => seek(-10, true))
+        edge(pad, 5, () => seek(10, true))
+        edge(pad, 9, () => void toggleFullscreen(true))
+
+        const horizontal = Math.abs(pad.axes[0] || 0) > .58 ? Math.sign(pad.axes[0]) : 0
+        const left = pad.buttons[14]?.pressed || horizontal < 0
+        const right = pad.buttons[15]?.pressed || horizontal > 0
+        if ((left || right) && now - gamepadLastSeek.current > 220) {
+          seek(left ? -10 : 10, true)
+          gamepadLastSeek.current = now
+        } else if (!left && !right) {
+          gamepadLastSeek.current = 0
+        }
+        if (pad.buttons[12]?.pressed || pad.buttons[13]?.pressed || Math.abs(pad.axes[1] || 0) > .58) {
+          showPointerAndControls()
+          if (!(document.activeElement instanceof HTMLButtonElement)) {
+            document.querySelector<HTMLButtonElement>('.player-controls button')?.focus({ preventScroll: true })
+          }
+        }
+      }
+      frame = window.requestAnimationFrame(poll)
+    }
+    frame = window.requestAnimationFrame(poll)
+    return () => window.cancelAnimationFrame(frame)
+  }, [controlsVisible, handleClose, networkPanelOpen, tracksPanelOpen, player.paused, player.position, player.duration, session?.localFileId, bufferOverlayActive])
+
   const formatTime = (secs: number) => {
     if (!Number.isFinite(secs) || secs < 0) return '0:00'
     const h = Math.floor(secs / 3600)
@@ -463,6 +525,7 @@ export function Player() {
 
   return (
     <IconoirProvider iconProps={{ strokeWidth: 1.65 }}>
+      <MotionConfig reducedMotion={accessibility.reducedMotion ? 'always' : 'user'}>
       <motion.div
         className={`player-container ${cursorVisible ? '' : 'player-cursor-hidden'}`}
         initial={{ opacity: 0 }}
@@ -684,6 +747,7 @@ export function Player() {
           )}
         </AnimatePresence>
       </motion.div>
+      </MotionConfig>
     </IconoirProvider>
   )
 }

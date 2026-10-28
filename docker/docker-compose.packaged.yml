@@ -55,7 +55,6 @@ services:
       vpn:
         condition: service_healthy
     environment:
-      - NETWATCH_DOWNLOAD_DIR=/tmp/netwatch
       - NETWATCH_VPN_INTERFACE=wg0
       - NETWATCH_LISTEN_PORT=6881
       - NETWATCH_UPLOAD_LIMIT=65536
