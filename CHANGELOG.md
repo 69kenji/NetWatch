@@ -1,3 +1,6 @@
+### 2.0.1
+  * fix(player): dismiss keyboard seek feedback automatically
+
 ### 2.0.0
   * feat(profiles): add local profiles with separate preferences, lists, collections and watch history
   * feat(profiles): add profile pictures, names and taglines

@@ -261,9 +261,12 @@ export function Player() {
     return () => {
       if (controlsHideTimer.current) clearTimeout(controlsHideTimer.current)
       if (cursorHideTimer.current) clearTimeout(cursorHideTimer.current)
-      if (feedbackTimer.current) clearTimeout(feedbackTimer.current)
     }
   }, [showPointerAndControls])
+
+  useEffect(() => () => {
+    if (feedbackTimer.current) clearTimeout(feedbackTimer.current)
+  }, [])
 
   useEffect(() => {
     if (bufferOverlayActive) {
